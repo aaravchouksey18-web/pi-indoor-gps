@@ -22,8 +22,8 @@ Hardening in this version:
     trust (any LAN host can otherwise author sightings on this broker);
   * estimates only publish when the matcher is unambiguous (full fingerprint
     coverage + distance ceiling + margin), and carry a units tag so "distance"
-    can't be mistaken for metres (it is the squared-Euclidean RSSI distance
-    in dB).
+    can't be mistaken for metres (it is the Euclidean RSSI distance in dB,
+    not a signal level).
 """
 import argparse
 import json
@@ -98,13 +98,12 @@ def make_client(state, min_boards=1):
             m = best_match(vec, state.spots)
             if m.spot is None:
                 reason = ("no spots map" if not state.spots
-                          else "ambiguous / out of range"
-                          if vec else "no fresh nodes")
+                          else "distance/margin rejected")
                 print(f"[match] {s['mac']} vector {format_vector(vec)}: "
                       f"no match ({reason})", flush=True)
                 return
             est = {"board": s["board"], "mac": s["mac"], "vector": vec,
-                   "spot": m.spot, "distance": m.distance, "units": "dB",
+                   "spot": m.spot, "distance": m.distance, "units": "dB distance",
                    "confidence": m.confidence, "margin": m.margin,
                    "matched_boards": m.boards, "ts": round(time.time(), 3)}
             client.publish(TOPIC_ESTIMATE, json.dumps(est))
@@ -144,6 +143,10 @@ def main(argv=None):
               flush=True)
 
     state = State(target=target, boards=boards)
+    if state.spots:
+        print(f"map: {len(state.spots)} spot(s) loaded once at startup from "
+              "spots.json — recalibrating while the collector runs requires "
+              "a restart", flush=True)
     mqttc = make_client(state, min_boards=args.min_boards)
 
     while True:                     # retry broker-down at startup

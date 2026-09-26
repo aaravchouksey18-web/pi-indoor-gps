@@ -35,16 +35,22 @@ def median_per_board(samples):
 
 
 def load_existing_spots():
-    """Read the current map tolerantly ({} when missing/corrupt)."""
+    """Read the current map; {} when missing, exit(1) when corrupt.
+
+    A corrupt spots.json is never silently replaced with the new spot —
+    the existing fingerprints must be preserved, so this aborts instead.
+    """
     if not os.path.exists(SPOTS_PATH):
         return {}
     try:
         with open(SPOTS_PATH) as f:
             return json.load(f).get("spots", {}) or {}
     except (OSError, ValueError):
-        print(f"warning: {SPOTS_PATH} unreadable — starting from an empty map",
-              flush=True)
-        return {}
+        # never silently replace a corrupt map with {} and then overwrite it
+        # with one new spot — the existing fingerprints must be preserved
+        print(f"error: {SPOTS_PATH} is unreadable/corrupt — refusing to "
+              "overwrite it; fix or remove the file first", flush=True)
+        sys.exit(1)
 
 
 def main(argv=None):
@@ -81,13 +87,25 @@ def main(argv=None):
             return
         samples.setdefault(s["board"], []).append(s["rssi"])
 
+    def on_connect(client, userdata, flags, reason_code, properties=None):
+        # paho's auto-reconnect does NOT restore subscriptions: without this,
+        # a broker restart or WiFi blip mid-window would silently collect
+        # nothing and then overwrite the spot with a half-measured sample.
+        client.subscribe("indoor/sighting")
+        print("calibrate: connected; subscribed to indoor/sighting",
+              flush=True)
+
     mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    mqttc.on_connect = on_connect
     mqttc.on_message = on_message
-    try:
-        mqttc.connect(args.host, args.port, 30)
-    except OSError as e:
-        sys.exit(f"cannot reach broker {args.host}:{args.port}: {e}")
-    mqttc.subscribe("indoor/sighting")
+    while True:                     # retry broker-down at startup
+        try:
+            mqttc.connect(args.host, args.port, 30)
+            break
+        except OSError as e:
+            print(f"warning: broker {args.host}:{args.port} unavailable "
+                  f"({e}); retrying in 5 s", flush=True)
+            time.sleep(5)
     mqttc.loop_start()
 
     print(f"collecting for {args.spot}: {args.seconds}s on indoor/sighting "

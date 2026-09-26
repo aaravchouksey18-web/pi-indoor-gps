@@ -22,7 +22,7 @@ from collections import namedtuple
 
 SPOTS_PATH = os.path.join(os.path.dirname(__file__), "spots.json")
 
-# squared-Euclidean distance ceiling for a "real" match (in dBm²), and the
+# Euclidean-distance ceiling for a "real" match (in dB), and the
 # margin the winner must hold over the runner-up to be unambiguous.
 MAX_DIST_DB = 48.0
 MIN_MARGIN_DB = 2.5
@@ -34,15 +34,38 @@ def load_spots(path=SPOTS_PATH):
     """Return {spot_name: {board: rssi}} from the JSON map ({} if missing).
 
     Never raises: a missing or corrupted spots.json means "no map yet",
-    which the caller already treats as no match.
+    which the caller already treats as no match. Spot records that are not
+    {board: rssi} dicts (e.g. from a hand-edit) are dropped, and only finite
+    numeric RSSI values are kept, so a malformed map file can never crash a
+    collector inside an MQTT callback.
     """
     if not os.path.exists(path):
         return {}
     try:
         with open(path) as f:
-            return json.load(f).get("spots", {}) or {}
+            raw = json.load(f)
     except (OSError, ValueError):
         return {}
+    spots = raw.get("spots") if isinstance(raw, dict) else None
+    if not isinstance(spots, dict):
+        return {}
+    out = {}
+    for name, fp in spots.items():
+        if not isinstance(fp, dict):
+            continue
+        clean = {}
+        for board, rssi in fp.items():
+            if board == "_meta":
+                continue
+            try:
+                value = float(rssi)
+            except (TypeError, ValueError):
+                continue
+            if value == value and value != float("inf") and value != float("-inf"):
+                clean[board] = value
+        if clean:
+            out[name] = clean
+    return out
 
 
 def compute_distances(live, spots):

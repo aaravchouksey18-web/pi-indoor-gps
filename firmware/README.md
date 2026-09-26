@@ -15,15 +15,22 @@
 Published MACs are **lowercase** colon-separated (`aa:bb:cc:dd:ee:ff`) — keep
 `--target` lowercase on the Pi side.
 
-## Libraries (pinned)
+## Libraries (versions used)
 
-Compile in the Arduino IDE / arduino-cli with these exact versions — the
-sketch uses `StaticJsonDocument` (ArduinoJson **v6** API, not v7) and the
-ESP8266 PubSubClient API:
+Built and tested with these exact versions — the sketch uses
+`StaticJsonDocument` (ArduinoJson **v6** API, not v7), the ESP8266
+PubSubClient API, and ESP8266 core 3.x (bundles `ESP8266WiFi` +
+`user_interface.h`). With arduino-cli you can reproduce the build with:
 
-- **ArduinoJson** `6.21.5`
-- **PubSubClient** `2.8` (or any 2.x)
-- ESP8266 core `3.x` (bundles `ESP8266WiFi` + `user_interface.h`)
+```sh
+arduino-cli core install esp8266:esp8266@3.1.2
+arduino-cli lib install ArduinoJson@6.21.5
+arduino-cli lib install PubSubClient@2.8.0
+arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 pi-indoor-sniffer
+```
+
+(No `sketch.yaml`/`lib.json` is shipped, so the pins are documented here
+rather than enforced by the toolchain.)
 
 Please don't "upgrade" ArduinoJson to v7 in a local edit — v7 dropped
 `StaticJsonDocument` and the sketch would need a migration, not a pin bump.

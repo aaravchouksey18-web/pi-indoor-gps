@@ -41,6 +41,9 @@ def main(argv=None):
         ap.error(f"--target {args.target!r} is not a valid MAC address")
     if args.jitter < 0:
         ap.error("--jitter must be >= 0")
+    if not (-150 <= args.rssi <= 0):
+        ap.error("--rssi must be within [-150, 0] dBm (collectors reject "
+                 "values outside this band)")
 
     mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     try:
@@ -57,6 +60,9 @@ def main(argv=None):
     sent = 0
     for i in range(args.count):
         rssi = args.rssi + random.randint(-args.jitter, args.jitter) if args.jitter else args.rssi
+        # clamp into the [-150, 0] dBm band the collector accepts, so jitter
+        # near the edges still produces observable (non-dropped) samples
+        rssi = max(-150, min(0, rssi))
         payload = {"board": args.board, "mac": mac, "rssi": rssi, "rssi_n": 1}
         info = mqttc.publish(TOPIC_SIGHTING, json.dumps(payload))
         if info.rc != mqtt.MQTT_ERR_SUCCESS:

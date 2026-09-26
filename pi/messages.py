@@ -4,7 +4,9 @@ Indoor positioning runs on a LAN-trusted broker (mosquitto, no auth), so the
 collectors must be defensive: every payload arriving on indoor/sighting is
 untrusted input. parse_sighting() validates shape + range and returns a
 normalized dict or None, so a malformed or hostile message can never crash a
-collector or poison a fingerprint.
+collector or poison a fingerprint. The other untrusted file is the
+fingerprint map (spots.json), which fingerprint.load_spots() validates
+separately before anything scores against it.
 """
 import json
 import re
