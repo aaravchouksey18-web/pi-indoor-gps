@@ -6,10 +6,11 @@ plain Euclidean distance on the RSSI in dBm.
 
 Matching policy (the parts that keep estimates honest):
 
-  * **Full coverage** — a spot candidate must see *every* board its
-    fingerprint records. A 1-board fingerprint can no longer win against a
-    2-board one just because it happens to share one node; partial matches
-    are dropped, not scored.
+  * **Full coverage, both ways** — a spot candidate must explain
+    *every* board the live vector reports AND see every board its own
+    fingerprint records. A 1-board fingerprint can no longer beat a 2-board
+    one by sharing one node while ignoring a contradicting one; a node the
+    map does not know blocks the match until the map is recalibrated.
   * **Distance ceiling** — beyond MAX_DIST_DB the measured vector is too far
     from any spot to claim one.
   * **Margin** — the best spot must beat the runner-up by MIN_MARGIN_DB,
@@ -28,7 +29,7 @@ SPOTS_PATH = os.path.join(os.path.dirname(__file__), "spots.json")
 MAX_DIST_DB = 48.0
 MIN_MARGIN_DB = 2.5
 
-Match = namedtuple("Match", "spot distance confidence margin boards")
+Match = namedtuple("Match", "spot distance confidence margin boards reason")
 
 
 def _sanitize_spots(spots):
@@ -88,39 +89,49 @@ def compute_distances(live, spots):
         fp_boards = {k: v for k, v in fp.items() if k != "_meta"}
         if not fp_boards:
             continue
-        common = [b for b in live if b in fp_boards]
-        if len(common) < len(fp_boards):    # incomplete fingerprint: no credit
+        # coverage runs BOTH ways and must be exact: the live vector and the
+        # fingerprint must name the same boards. A spot that ignores a live
+        # board could dodge contradicting evidence (a 1-board spot must not
+        # beat a 2-board one), and a vector missing a board the spot was
+        # calibrated with has not fully verified it — both are refused.
+        if set(live) != set(fp_boards):
             continue
-        d = sum((live[b] - fp_boards[b]) ** 2 for b in common)
+        d = sum((live[b] - fp_boards[b]) ** 2 for b in live)
         dist = d ** 0.5
-        scored.append((name, round(dist, 2), len(common)))
+        scored.append((name, round(dist, 2), len(live)))
     scored.sort(key=lambda t: t[1])
     return scored
 
 
 def best_match(live, spots=None, max_dist_db=MAX_DIST_DB,
                min_margin_db=MIN_MARGIN_DB):
-    """Return a Match, or Match(None, None, None, None, 0) if no honest match.
+    """Return a Match, or Match(None, ..., reason) if no honest match.
+
+    `reason` describes how the refusal happened so the collector can give a
+    useful diagnostic: "no_live" / "no_map" / "coverage" (no candidate
+    explains every live board) / "distance" / "ambiguous" / None on success.
 
     `live` is a {board: rssi} vector from the collector; `spots` defaults to
     the on-disk fingerprint map and is sanitized either way.
     """
     spots = _sanitize_spots(spots) if spots is not None else load_spots()
-    if not live or not spots:
-        return Match(None, None, None, None, 0)
+    if not live:
+        return Match(None, None, None, None, 0, "no_live")
+    if not spots:
+        return Match(None, None, None, None, 0, "no_map")
     scored = compute_distances(live, spots)
     if not scored:
-        return Match(None, None, None, None, 0)
+        return Match(None, None, None, None, 0, "coverage")
     name, dist, boards = scored[0]
     if dist > max_dist_db:
-        return Match(None, None, None, None, 0)
+        return Match(None, None, None, None, 0, "distance")
     margin = None
     if len(scored) > 1:
         margin = round(scored[1][1] - dist, 2)
         if margin < min_margin_db:
-            return Match(None, None, None, None, 0)     # ambiguous
+            return Match(None, None, None, None, 0, "ambiguous")  # too close
     confidence = round(1.0 / (1.0 + dist), 3)
-    return Match(name, dist, confidence, margin, boards)
+    return Match(name, dist, confidence, margin, boards, None)
 
 
 def format_vector(live):

@@ -15,6 +15,7 @@ firmware/*/config.h
 
 # device-derived data (may contain personal device identifiers)
 pi/spots.json
+pi/*.tmp
 measurements/raw/
 
 # os

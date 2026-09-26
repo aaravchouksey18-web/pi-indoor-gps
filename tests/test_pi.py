@@ -80,14 +80,43 @@ class LoadSpotsTest(unittest.TestCase):
 
 class MatchingTest(unittest.TestCase):
     def test_full_coverage_required(self):
-        # a 3-board fingerprint must NOT score when the live vector only
-        # covers two of its boards (partial matches are dropped, not scored)
+        # coverage runs both ways: a 2-board fingerprint is not scored against
+        # a 3-board live vector, and a candidate that ignores a live board is
+        # dropped too (only the spot that explains every live board scores)
         spots = {"full": {"a": -60, "b": -70},
-                 "incomplete": {"a": -58, "b": -75, "d": -80}}
+                 "incomplete": {"a": -58, "b": -75, "d": -80},
+                 "all3": {"a": -58, "b": -70, "c": -40}}
         scored = fingerprint.compute_distances({"a": -58, "b": -70, "c": -40}, spots)
+        self.assertEqual([s[0] for s in scored], ["all3"])
+
+    def test_narrow_fingerprint_cannot_ignore_contradicting_node(self):
+        # pass-4 HIGH: live a=-59 b=-90 contradicts the wide spot by 20 dB on
+        # board b; the 1-board "narrow" fingerprint must not win by ignoring
+        # that board (it fails to explain every live board, so it is dropped)
+        spots = {"narrow": {"a": -58}, "wide": {"a": -60, "b": -70}}
+        scored = fingerprint.compute_distances({"a": -59, "b": -90}, spots)
         names = [s[0] for s in scored]
-        self.assertIn("full", names)
-        self.assertNotIn("incomplete", names)
+        self.assertNotIn("narrow", names)
+        self.assertEqual(names, ["wide"])
+
+    def test_refusal_reasons(self):
+        # reasons distinguish the failure mode so the collector can tell the
+        # user which knob to turn (no map vs no coverage vs too far vs close)
+        self.assertEqual(fingerprint.best_match({}).reason, "no_live")
+        self.assertEqual(fingerprint.best_match({"a": -50}, spots={}).reason,
+                         "no_map")
+        far = fingerprint.best_match({"a": -50},
+                                     spots={"a": {"a": -110}, "b": {"a": -105}})
+        self.assertEqual(far.reason, "distance")
+        close = fingerprint.best_match({"a": -49},
+                                       spots={"x": {"a": -58}, "y": {"a": -40}})
+        self.assertEqual(close.reason, "ambiguous")
+        unknown = fingerprint.best_match({"zz": -40}, spots={"s": {"a": -58}})
+        self.assertEqual(unknown.reason, "coverage")
+        ok = fingerprint.best_match({"a": -30},
+                                    spots={"x": {"a": -58}, "y": {"a": -40}})
+        self.assertIsNone(ok.reason)
+        self.assertEqual(ok.spot, "y")
 
     def test_distance_is_euclidean_not_squared(self):
         spots = {"s": {"a": -58}}

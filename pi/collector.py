@@ -18,8 +18,9 @@ Hardening in this version:
     no longer leave the collector permanently deaf with zero diagnostics;
   * payloads are validated by messages.parse_sighting() before touching any
     state, so a malformed/hostile message can't crash or poison the data;
-  * --boards allowlist confines the collector to the nodes you actually
-    trust (any LAN host can otherwise author sightings on this broker);
+  * --boards filters sightings down to the nodes you configured — a
+    misconfiguration guard, NOT an auth boundary (any LAN host can author
+    sightings on an open broker; secure the broker if that matters);
   * estimates only publish when the matcher is unambiguous (full fingerprint
     coverage + distance ceiling + margin), and carry a units tag so "distance"
     can't be mistaken for metres (it is the Euclidean RSSI distance in dB,
@@ -101,8 +102,15 @@ def make_client(state, min_boards=1):
                 return
             m = best_match(vec, state.spots)
             if m.spot is None:
-                reason = ("no spots map" if not state.spots
-                          else "distance/margin rejected")
+                reason = {
+                    "no_map": "no spots map (run calibrate.py first)",
+                    "coverage": ("live board set matches no spot (a node "
+                                 "the map expects is silent, or an "
+                                 "unexpected node is live)"),
+                    "distance": "closest spot beyond the distance ceiling",
+                    "ambiguous": "two spots too close to call (margin)",
+                    "no_live": "empty live vector",
+                }.get(m.reason, "no match")
                 print(f"[match] {s['mac']} vector {format_vector(vec)}: "
                       f"no match ({reason})", flush=True)
                 return
@@ -131,6 +139,12 @@ def main(argv=None):
                     help="minimum fresh boards before an estimate publishes")
     ap.add_argument("--host", default=os.environ.get("MQTT_HOST", "localhost"))
     ap.add_argument("--port", type=int, default=1883)
+    ap.add_argument("--mqtt-username",
+                    default=os.environ.get("MQTT_USER"),
+                    help="MQTT username if the broker requires auth")
+    ap.add_argument("--mqtt-password",
+                    default=os.environ.get("MQTT_PASS"),
+                    help="MQTT password (used with --mqtt-username)")
     args = ap.parse_args(argv)
 
     target = normalize_mac(args.target) if args.target else None
@@ -152,6 +166,9 @@ def main(argv=None):
               "spots.json — recalibrating while the collector runs requires "
               "a restart", flush=True)
     mqttc = make_client(state, min_boards=args.min_boards)
+    if args.mqtt_username:
+        mqttc.username_pw_set(args.mqtt_username, args.mqtt_password)
+        print("mqtt auth: username configured", flush=True)
 
     while True:                     # retry broker-down at startup
         try:

@@ -36,8 +36,10 @@ nodes give coarse separation between rooms with distinct RF exposure; more
 nodes sharpen the map.
 
 **Honest matching:** the matcher refuses guesses. A spot is only a candidate
-when *every* board its fingerprint records has reported a fresh RSSI (no
-partial-credit "1-board spot beats a 2-board spot"), when the measured vector
+when *every* board its fingerprint records has reported a fresh RSSI AND the
+fingerprint explains every board in the live vector (no partial credit on
+either side — a 1-board spot cannot beat a 2-board one by ignoring a
+contradicting node), when the measured vector
 is within a distance ceiling, and when the best spot beats the runner-up by a
 margin — otherwise no `indoor/estimate` is published. The estimate payload
 carries `units:"dB distance"` for its `distance`, plus `confidence` and
@@ -57,12 +59,18 @@ carries `units:"dB distance"` for its `distance`, plus `confidence` and
    `config.h` and fill in board id, WiFi creds, broker, sniff channel.
 2. Install the Paho dependency: `pip install -r requirements.txt`
    (`paho-mqtt>=2.0` — every script uses the 2.x API).
-3. Record fingerprints: `python3 pi/calibrate.py --spot kitchen --seconds 60 --target aa:bb:cc:dd:ee:ff`
-   (the firmware publishes **lowercase** colon-separated MACs; the scripts
+3. Record fingerprints:
+   `python3 pi/calibrate.py --spot kitchen --seconds 180 --target aa:bb:cc:dd:ee:ff`
+   (each node reports a device about once per 45 s — 15 s sniff + 30 s
+   report — so the 180 s window covers >= 3 duty cycles; the firmware
+   publishes **lowercase** colon-separated MACs and the scripts
    lowercase the `--target` for you and refuse an invalid one).
 4. Run the collector: `python3 pi/collector.py --target aa:bb:cc:dd:ee:ff`
-   (add `--boards a,b` to trust only specific nodes) — watch
-   `indoor/estimate`. No phone handy for a smoke test?
+   (add `--boards a,b` to filter to specific nodes — a filter, not an auth
+   boundary) — watch `indoor/estimate`. Broker needs auth? Pass
+   `--mqtt-username/--mqtt-password` (or set `MQTT_USER`/`MQTT_PASS`,
+   which the firmware also reads from `config.h`). No phone handy for a
+   smoke test?
    `python3 pi/inject.py --target aa:bb:cc:dd:ee:ff --rssi -58 --count 20`.
 
 ## Sanitization rule

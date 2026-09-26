@@ -4,6 +4,8 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+// BOARD_ID must stay <= 16 chars: pi/messages.py drops longer board ids
+// silently, and the sketch below static_asserts the cap at compile time.
 #define BOARD_ID     "a"            // distinct per node: "a", "b", ...
 #define SNIFF_CHANNEL 6             // channel your network associates on
 
@@ -12,5 +14,11 @@
 
 #define MQTT_HOST   "YOUR_BROKER_HOST_OR_IP"
 #define MQTT_PORT   1883
+
+// Optional broker credentials (empty = anonymous). When MQTT_USER is
+// non-empty the sketch calls mqtt.setCredentials(); the Pi scripts read the
+// same names from the MQTT_USER / MQTT_PASS environment variables.
+#define MQTT_USER   ""
+#define MQTT_PASS   ""
 
 #endif

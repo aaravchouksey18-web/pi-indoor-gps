@@ -34,6 +34,12 @@ def main(argv=None):
     ap.add_argument("--interval", type=float, default=5.0)
     ap.add_argument("--host", default=os.environ.get("MQTT_HOST", "localhost"))
     ap.add_argument("--port", type=int, default=1883)
+    ap.add_argument("--mqtt-username",
+                    default=os.environ.get("MQTT_USER"),
+                    help="MQTT username if the broker requires auth")
+    ap.add_argument("--mqtt-password",
+                    default=os.environ.get("MQTT_PASS"),
+                    help="MQTT password (used with --mqtt-username)")
     args = ap.parse_args(argv)
 
     mac = normalize_mac(args.target)
@@ -46,6 +52,9 @@ def main(argv=None):
                  "values outside this band)")
 
     mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    if args.mqtt_username:
+        mqttc.username_pw_set(args.mqtt_username, args.mqtt_password)
+        print("mqtt auth: username configured", flush=True)
     try:
         mqttc.connect(args.host, args.port, 30)
     except OSError as e:

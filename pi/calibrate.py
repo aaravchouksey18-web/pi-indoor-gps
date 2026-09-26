@@ -67,9 +67,17 @@ def main(argv=None):
     ap.add_argument("--target", required=True,
                     help="target device MAC, e.g. aa:bb:cc:dd:ee:ff")
     ap.add_argument("--seconds", type=int, default=60,
-                    help="how long to listen (min 5)")
+                    help="how long to listen (min 5). Each node reports a "
+                         "device about once per 45 s (15 s sniff + 30 s "
+                         "home), so prefer >= 180 s for reliable samples")
     ap.add_argument("--host", default=os.environ.get("MQTT_HOST", "localhost"))
     ap.add_argument("--port", type=int, default=1883)
+    ap.add_argument("--mqtt-username",
+                    default=os.environ.get("MQTT_USER"),
+                    help="MQTT username if the broker requires auth")
+    ap.add_argument("--mqtt-password",
+                    default=os.environ.get("MQTT_PASS"),
+                    help="MQTT password (used with --mqtt-username)")
     ap.add_argument("--min-samples", type=int, default=3,
                     help="minimum TOTAL RSSI samples before saving")
     ap.add_argument("--min-per-board", type=int, default=2,
@@ -110,6 +118,9 @@ def main(argv=None):
     mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     mqttc.on_connect = on_connect
     mqttc.on_message = on_message
+    if args.mqtt_username:
+        mqttc.username_pw_set(args.mqtt_username, args.mqtt_password)
+        print("mqtt auth: username configured", flush=True)
     while True:                     # retry broker-down at startup
         try:
             mqttc.connect(args.host, args.port, 30)

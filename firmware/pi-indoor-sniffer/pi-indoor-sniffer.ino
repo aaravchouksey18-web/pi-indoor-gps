@@ -17,6 +17,12 @@ extern "C" {
 
 #include "config.h"
 
+// mirror pi/messages.py's 16-char board cap in the Pi collector: a
+// longer BOARD_ID would compile + flash yet publish sightings nobody
+// accepts, so trap it at build time instead
+static_assert(sizeof(BOARD_ID) <= 17, "BOARD_ID must be <= 16 chars "
+              "(the Pi collector drops longer board ids)");
+
 #define FRAME_TYPE_MGMT   0
 #define SUBTYPE_PROBE_REQ 4
 
@@ -213,6 +219,11 @@ void setup() {
   Serial.printf("sniffing on channel %d\n", wifi_get_channel());
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
+#ifdef MQTT_USER
+  if (strlen(MQTT_USER) > 0) {
+    mqtt.setCredentials(MQTT_USER, MQTT_PASS);   // MQTT 3.1 username/password
+  }
+#endif
   mqtt.setBufferSize(256);
   mqtt.setKeepAlive(60);
 
