@@ -46,8 +46,8 @@ the live broker, then calibrate a first two-spot map.
   esp8266 core (3.1.2) and toolchain were already in `~/.arduino15` from the
   earlier project.
 - Node **b** (V3, CH340) plugged into the Pi → `/dev/ttyUSB0`. `config.h`
-  scaffolded in the new repo (`BOARD_ID "b"`, broker 192.0.2.14, user-filled
-  WiFi creds). Compiled and flashed: 288048 bytes, hash verified, hard reset.
+  scaffolded in the new repo (`BOARD_ID "b"`, broker = Pi LAN address,
+  user-filled WiFi creds). Compiled and flashed: 288048 bytes, hash verified, hard reset.
 - First cycle on the live broker delivered `indoor/online` (LWT) and
   `indoor/sighting` with per-device `rssi` / `rssi_n`. The RSSI extension
   works on real silicon. Node b currently sees 3 ambient emitters from the Pi
