@@ -50,6 +50,16 @@ def main(argv=None):
     if not (-150 <= args.rssi <= 0):
         ap.error("--rssi must be within [-150, 0] dBm (collectors reject "
                  "values outside this band)")
+    if args.count < 1:
+        ap.error("--count must be >= 1")
+    if args.interval <= 0:
+        ap.error("--interval must be > 0")
+    if not (1 <= args.port <= 65535):
+        ap.error("--port must be 1..65535")
+    board = (args.board or "").strip()
+    if not board or board == "_meta":
+        ap.error("--board must be a non-empty id (and not \"_meta\")")
+    args.board = board
 
     mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     if args.mqtt_username:

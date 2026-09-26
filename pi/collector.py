@@ -36,7 +36,12 @@ import paho.mqtt.client as mqtt
 from fingerprint import best_match, format_vector, load_spots
 from messages import normalize_mac, parse_sighting
 
-WINDOW_S = 60.0
+# How long a node's RSSI stays fresh. The firmware sniffs ~15 s then reports
+# ~30 s (a ~45 s duty cycle); a node that hears the target late can blow any
+# single window, and under exact-set-equality ONE stale node turns every
+# estimate into "coverage". 2x the duty cycle keeps one slow node from
+# killing the whole vector.
+WINDOW_S = 90.0
 
 TOPIC_SIGHTING = "indoor/sighting"
 TOPIC_ESTIMATE = "indoor/estimate"
@@ -153,12 +158,21 @@ def main(argv=None):
               "running as a passive observer", flush=True)
     if args.min_boards < 1:
         ap.error("--min-boards must be >= 1")
+    if not (1 <= args.port <= 65535):
+        ap.error("--port must be 1..65535")
 
     boards = None
     if args.boards:
         boards = {b.strip() for b in args.boards.split(",") if b.strip()}
-        print(f"allowlist: only boards {sorted(boards)} are trusted",
-              flush=True)
+        if boards:
+            print(f"allowlist: only boards {sorted(boards)} are trusted",
+                  flush=True)
+        else:
+            # "--boards ," parses to an empty set, which State() then treats
+            # as allow-all — say so instead of printing "only boards []".
+            print("--boards resolved to an empty set (only commas/blank "
+                  "entries) — treating it as ALL nodes; re-run with real "
+                  "board ids if that wasn't the intent", flush=True)
 
     state = State(target=target, boards=boards)
     if state.spots:

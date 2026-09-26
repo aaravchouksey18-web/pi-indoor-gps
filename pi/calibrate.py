@@ -84,8 +84,14 @@ def main(argv=None):
                     help="minimum samples per board before it is trusted; "
                          "boards below this are dropped with a warning")
     args = ap.parse_args(argv)
+    spot = (args.spot or "").strip()
+    if not spot:
+        ap.error("--spot must be a non-empty spot name")
+    args.spot = spot
     if args.seconds < 5:
         ap.error("--seconds must be >= 5 (a shorter window is pure noise)")
+    if not (1 <= args.port <= 65535):
+        ap.error("--port must be 1..65535")
 
     target = normalize_mac(args.target)
     if target is None:

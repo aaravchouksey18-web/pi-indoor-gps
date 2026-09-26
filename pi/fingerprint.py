@@ -96,9 +96,15 @@ def compute_distances(live, spots):
         # calibrated with has not fully verified it — both are refused.
         if set(live) != set(fp_boards):
             continue
-        d = sum((live[b] - fp_boards[b]) ** 2 for b in live)
+        d = 0.0
+        for b in live:
+            diff = live[b] - fp_boards[b]
+            # x*x semantics, not ** 2: a huge-but-finite diff must overflow
+            # to inf (which the distance ceiling then refuses) instead of
+            # raising OverflowError and killing the collector process.
+            d += diff * diff
         dist = d ** 0.5
-        scored.append((name, round(dist, 2), len(live)))
+        scored.append((name, dist, len(live)))
     scored.sort(key=lambda t: t[1])
     return scored
 
@@ -123,15 +129,21 @@ def best_match(live, spots=None, max_dist_db=MAX_DIST_DB,
     if not scored:
         return Match(None, None, None, None, 0, "coverage")
     name, dist, boards = scored[0]
-    if dist > max_dist_db:
+    if not math.isfinite(dist) or dist > max_dist_db:
+        # inf from the diff*diff overflow above is a "distance", not a crash
         return Match(None, None, None, None, 0, "distance")
     margin = None
     if len(scored) > 1:
-        margin = round(scored[1][1] - dist, 2)
-        if margin < min_margin_db:
-            return Match(None, None, None, None, 0, "ambiguous")  # too close
+        raw_margin = scored[1][1] - dist
+        # decide on the UNROUNDED gap: rounding 2.4999… to 2.5 would let a
+        # sub-threshold margin publish as "unambiguous"; round only for the
+        # reported payload. An infinite runner-up has no meaningful margin.
+        if math.isfinite(raw_margin):
+            margin = round(raw_margin, 2)
+            if raw_margin < min_margin_db:
+                return Match(None, None, None, None, 0, "ambiguous")  # close
     confidence = round(1.0 / (1.0 + dist), 3)
-    return Match(name, dist, confidence, margin, boards, None)
+    return Match(name, round(dist, 2), confidence, margin, boards, None)
 
 
 def format_vector(live):

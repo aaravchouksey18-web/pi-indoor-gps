@@ -77,6 +77,28 @@ class LoadSpotsTest(unittest.TestCase):
             m = fingerprint.best_match({"a": -58}, spots=fingerprint.load_spots(path))
             self.assertIsNone(m.spot)
 
+    def test_huge_but_finite_spot_rssi_refuses_not_crashes(self):
+        # 1e200 is FINITE, so the sanitizer keeps it; squaring the diff would
+        # raise OverflowError unless computed with x*x (overflow -> inf). The
+        # matcher must come back "distance", never crash the process.
+        m = fingerprint.best_match(
+            {"a": -58, "b": -70},
+            spots={"kitchen": {"a": 1e200, "b": -70}})
+        self.assertIsNone(m.spot)
+        self.assertEqual(m.reason, "distance")
+
+    def test_runner_up_overflow_does_not_crash(self):
+        # only the runner-up overflows to inf (a hostile 1e200 rssi in the
+        # map): the winner stays finite and truly matches. There must be no
+        # OverflowError and no Infinity leaking into the payload (margin
+        # stays None when the gap is not finite).
+        m = fingerprint.best_match(
+            {"a": -58, "b": -70},
+            spots={"far": {"a": -60, "b": -70}, "huge": {"a": 1e200, "b": -70}})
+        self.assertEqual(m.spot, "far")
+        self.assertIsNone(m.reason)
+        self.assertIsNone(m.margin)
+
 
 class MatchingTest(unittest.TestCase):
     def test_full_coverage_required(self):
@@ -137,6 +159,15 @@ class MatchingTest(unittest.TestCase):
         hit = fingerprint.best_match({"x": -30}, spots=tight)
         self.assertEqual(hit.spot, "b")
 
+    def test_margin_decision_uses_unrounded_gap(self):
+        # true gap is 2.4999 (< MIN_MARGIN_DB) but rounds to 2.5: the
+        # DECISION must refuse ("ambiguous"), not publish on the round.
+        m = fingerprint.best_match(
+            {"a": -60},
+            spots={"win": {"a": -55.0}, "run": {"a": -52.5001}})
+        self.assertIsNone(m.spot)
+        self.assertEqual(m.reason, "ambiguous")
+
 
 class MessagesTest(unittest.TestCase):
     def test_out_of_range_rssi_rejected(self):
@@ -162,6 +193,52 @@ class MessagesTest(unittest.TestCase):
         for mac in ("nope", "aa:bb:cc:dd:ee", "AA:BB:CC:DD:EE:FF:00"):
             payload = json.dumps({"board": "a", "mac": mac, "rssi": -45})
             self.assertIsNone(messages.parse_sighting(payload.encode()))
+
+    def test_meta_board_rejected(self):
+        # "_meta" is reserved for fingerprint-map metadata; a live node
+        # claiming it would pollute the collector's vector and break every
+        # match (spot fingerprints never contain "_meta").
+        for board in ("_meta", " _meta "):
+            payload = json.dumps({"board": board,
+                                  "mac": "aa:bb:cc:dd:ee:ff", "rssi": -45})
+            self.assertIsNone(messages.parse_sighting(payload.encode()))
+
+    def test_padded_board_is_stripped_not_dropped(self):
+        payload = json.dumps({"board": "  kitchen  ",
+                              "mac": "aa:bb:cc:dd:ee:ff", "rssi": -45})
+        self.assertEqual(messages.parse_sighting(payload.encode())["board"],
+                         "kitchen")
+
+
+class ArgGateTest(unittest.TestCase):
+    """CLI arg gates the pass-5 review added (each must exit with code 2)."""
+
+    def _script(self, name):
+        return os.path.join(os.path.dirname(__file__), "..", "pi", name)
+
+    def run_cli(self, script, *argv):
+        import subprocess
+        return subprocess.run([sys.executable, self._script(script), *argv],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_collector_rejects_bad_port(self):
+        self.assertEqual(self.run_cli("collector.py", "--port", "70000").returncode, 2)
+
+    def test_calibrate_rejects_empty_spot(self):
+        # required=True accepts "--spot ''"; the empty-name gate must catch it
+        r = self.run_cli("calibrate.py", "--spot", "",
+                         "--target", "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(r.returncode, 2)
+
+    def test_inject_rejects_bad_interval(self):
+        r = self.run_cli("inject.py", "--target", "aa:bb:cc:dd:ee:ff",
+                         "--rssi", "-45", "--interval", "0")
+        self.assertEqual(r.returncode, 2)
+
+    def test_inject_rejects_meta_board(self):
+        r = self.run_cli("inject.py", "--target", "aa:bb:cc:dd:ee:ff",
+                         "--rssi", "-45", "--board", "_meta")
+        self.assertEqual(r.returncode, 2)
 
 
 if __name__ == "__main__":

@@ -16,8 +16,10 @@
 #define MQTT_PORT   1883
 
 // Optional broker credentials (empty = anonymous). When MQTT_USER is
-// non-empty the sketch calls mqtt.setCredentials(); the Pi scripts read the
-// same names from the MQTT_USER / MQTT_PASS environment variables.
+// non-empty the sketch sends them in the MQTT CONNECT packet via the 8-arg
+// mqtt.connect() overload (PubSubClient has no setCredentials()); the Pi
+// scripts read the same names from the MQTT_USER / MQTT_PASS environment
+// variables.
 #define MQTT_USER   ""
 #define MQTT_PASS   ""
 

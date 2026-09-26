@@ -193,6 +193,15 @@ static bool mqtt_connect() {
   doc["online"] = false;              // LWT: published if we die mid-cycle
   char will[96];
   serializeJson(doc, will, sizeof(will));
+  // PubSubClient has no setCredentials(); credentials ride in the CONNECT
+  // packet. With MQTT_USER set, use the 8-arg overload (id, user, pass, will
+  // topic, will qos, will retain, will payload, clean session).
+#ifdef MQTT_USER
+  if (strlen(MQTT_USER) > 0) {
+    return mqtt.connect(BOARD_ID, MQTT_USER, MQTT_PASS,
+                        "indoor/online", 1, true, will, true);
+  }
+#endif
   return mqtt.connect(BOARD_ID, "indoor/online", 1, true, will);
 }
 
@@ -219,11 +228,7 @@ void setup() {
   Serial.printf("sniffing on channel %d\n", wifi_get_channel());
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
-#ifdef MQTT_USER
-  if (strlen(MQTT_USER) > 0) {
-    mqtt.setCredentials(MQTT_USER, MQTT_PASS);   // MQTT 3.1 username/password
-  }
-#endif
+  // auth (if configured) is sent by the 8-arg connect in mqtt_connect()
   mqtt.setBufferSize(256);
   mqtt.setKeepAlive(60);
 

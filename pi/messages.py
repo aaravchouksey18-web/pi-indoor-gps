@@ -29,7 +29,8 @@ def parse_sighting(payload_bytes):
     Returns {"board", "mac", "rssi"} (mac lowercased) or None. Rules:
 
       - must parse as a JSON object
-      - board: non-empty string, at most 16 chars
+      - board: non-empty string, at most 16 chars (never "_meta", which is
+        reserved for fingerprint-map metadata and would poison matching)
       - mac:   a valid 6-byte MAC (lowercased)
       - rssi:  an integer in the plausible dBm band [-150, 0]
 
@@ -45,6 +46,12 @@ def parse_sighting(payload_bytes):
     board = p.get("board")
     if not isinstance(board, str) or not board.strip() or len(board) > 16:
         return None
+    board = board.strip()
+    if board == "_meta":
+        # "_meta" is reserved for fingerprint-map metadata (calibrate stores
+        # it inside a spot); a live node claiming that name would pollute the
+        # collector's vector and turn every match into a "coverage" refusal.
+        return None
     mac = normalize_mac(p.get("mac"))
     if mac is None:
         return None
@@ -57,4 +64,4 @@ def parse_sighting(payload_bytes):
         return None
     if not -150 <= rssi <= 0:
         return None
-    return {"board": board.strip(), "mac": mac, "rssi": rssi}
+    return {"board": board, "mac": mac, "rssi": rssi}
