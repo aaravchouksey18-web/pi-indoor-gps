@@ -1,0 +1,16 @@
+// pi-indoor-sniffer configuration.
+// Copy this file to config.h and fill in your values. config.h is gitignored —
+// it holds real credentials, it must never be committed.
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define BOARD_ID     "a"            // distinct per node: "a", "b", ...
+#define SNIFF_CHANNEL 6             // channel your network associates on
+
+#define WIFI_SSID   "YOUR_WIFI_SSID"
+#define WIFI_PASS   "YOUR_WIFI_PASS"
+
+#define MQTT_HOST   "YOUR_BROKER_HOST_OR_IP"
+#define MQTT_PORT   1883
+
+#endif
