@@ -1,0 +1,2 @@
+# pi scripts use the paho 2.x API (CallbackAPIVersion.VERSION2) everywhere
+paho-mqtt>=2.0,<3

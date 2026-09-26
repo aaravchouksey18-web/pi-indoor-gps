@@ -7,14 +7,25 @@ Sits on indoor/sighting for the window, collects every RSSI sample the living
 nodes report for the target device, takes the median per board, and upserts
 that vector into spots.json (gitignored — fingerprints reference your own
 device MACs).
+
+Hardening in this version:
+  * payloads validated (messages.parse_sighting) — garbage can't be counted;
+  * boards with fewer than --min-per-board samples are dropped (with a loud
+    warning) instead of polluting the median with a single glitch sample;
+  * spots.json is written atomically (tmp + rename) so a crash can never
+    truncate the map;
+  * Ctrl-C aborts cleanly without writing anything.
 """
 import argparse
 import json
 import os
 import statistics
+import sys
 import time
 
 import paho.mqtt.client as mqtt
+
+from messages import normalize_mac, parse_sighting
 
 SPOTS_PATH = os.path.join(os.path.dirname(__file__), "spots.json")
 
@@ -23,58 +34,117 @@ def median_per_board(samples):
     return {b: round(statistics.median(v), 1) for b, v in samples.items() if v}
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def load_existing_spots():
+    """Read the current map tolerantly ({} when missing/corrupt)."""
+    if not os.path.exists(SPOTS_PATH):
+        return {}
+    try:
+        with open(SPOTS_PATH) as f:
+            return json.load(f).get("spots", {}) or {}
+    except (OSError, ValueError):
+        print(f"warning: {SPOTS_PATH} unreadable — starting from an empty map",
+              flush=True)
+        return {}
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="record an RSSI fingerprint")
     ap.add_argument("--spot", required=True, help="name of the spot, e.g. kitchen")
-    ap.add_argument("--target", required=True, help="target device MAC (lowercase)")
-    ap.add_argument("--seconds", type=int, default=60)
+    ap.add_argument("--target", required=True,
+                    help="target device MAC, e.g. aa:bb:cc:dd:ee:ff")
+    ap.add_argument("--seconds", type=int, default=60,
+                    help="how long to listen (min 5)")
     ap.add_argument("--host", default=os.environ.get("MQTT_HOST", "localhost"))
     ap.add_argument("--port", type=int, default=1883)
     ap.add_argument("--min-samples", type=int, default=3,
-                    help="minimum TOTAL RSSI samples collected across nodes")
-    args = ap.parse_args()
+                    help="minimum TOTAL RSSI samples before saving")
+    ap.add_argument("--min-per-board", type=int, default=2,
+                    help="minimum samples per board before it is trusted; "
+                         "boards below this are dropped with a warning")
+    args = ap.parse_args(argv)
+    if args.seconds < 5:
+        ap.error("--seconds must be >= 5 (a shorter window is pure noise)")
+
+    target = normalize_mac(args.target)
+    if target is None:
+        ap.error(f"--target {args.target!r} is not a valid MAC address")
+    if target != (args.target or "").strip().lower():
+        print("note: --target lowercased (the firmware publishes lowercase "
+              "MACs)", flush=True)
+    args.target = target
 
     samples = {}  # board -> [rssi...]
 
     def on_message(client, userdata, msg):
-        try:
-            p = json.loads(msg.payload.decode())
-        except (ValueError, UnicodeDecodeError):
+        s = parse_sighting(msg.payload)
+        if s is None or s["mac"] != args.target:
             return
-        if p.get("mac") != args.target or "rssi" not in p:
-            return
-        samples.setdefault(p["board"], []).append(int(p["rssi"]))
+        samples.setdefault(s["board"], []).append(s["rssi"])
 
     mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     mqttc.on_message = on_message
-    mqttc.connect(args.host, args.port, 30)
+    try:
+        mqttc.connect(args.host, args.port, 30)
+    except OSError as e:
+        sys.exit(f"cannot reach broker {args.host}:{args.port}: {e}")
     mqttc.subscribe("indoor/sighting")
     mqttc.loop_start()
 
-    print(f"collecting for {args.spot}: {args.seconds}s on indoor/sighting")
-    time.sleep(args.seconds)
+    print(f"collecting for {args.spot}: {args.seconds}s on indoor/sighting "
+          f"(target {args.target})")
+
+    def wait_for_window():
+        end = time.time() + args.seconds
+        while time.time() < end:
+            try:
+                time.sleep(min(1.0, end - time.time()))
+            except KeyboardInterrupt:
+                print("\naborted by Ctrl-C — nothing was written", flush=True)
+                mqttc.loop_stop()
+                return False
+        return True
+
+    if not wait_for_window():
+        return
     mqttc.loop_stop()
 
-    vec = median_per_board(samples)
     total = sum(len(v) for v in samples.values())
-    print("raw per-board samples:", json.dumps(
-        {b: len(v) for b, v in samples.items()}))
-    print("median vector:", json.dumps(vec))
+    per_board = {b: len(v) for b, v in samples.items()}
+    print("raw per-board samples:", json.dumps(per_board))
 
     if not samples or total < args.min_samples:
-        print(f"aborted: {total} samples across {len(vec)} node(s); "
-              f"need >= {args.min_samples} total")
+        print(f"aborted: {total} samples across {len(samples)} node(s); "
+              f"need >= {args.min_samples} total", flush=True)
         return
 
-    spots = {}
-    if os.path.exists(SPOTS_PATH):
-        with open(SPOTS_PATH) as f:
-            spots = json.load(f).get("spots", {})
+    dropped = {b: n for b, n in per_board.items() if n < args.min_per_board}
+    kept = {b for b in samples if b not in dropped}
+    if dropped and kept:
+        print(f"warning: dropping {sorted(dropped)} ({dropped} samples, "
+              f"< {args.min_per_board}): too noisy to trust", flush=True)
+    if not kept:
+        print(f"aborted: every board has fewer than {args.min_per_board} "
+              "samples; collect longer", flush=True)
+        return
+
+    vec = median_per_board({b: samples[b] for b in kept})
+    print("median vector:", json.dumps(vec))
+    if not vec:
+        print("aborted: no usable samples", flush=True)
+        return
+
+    spots = load_existing_spots()
     spots[args.spot] = dict(vec, _meta={"samples": args.seconds,
                                         "device": args.target,
-                                        "count": sum(len(v) for v in samples.values())})
-    with open(SPOTS_PATH, "w") as f:
-        json.dump({"spots": spots}, f, indent=2)
+                                        "count": total,
+                                        "per_board": per_board})
+    doc = {"spots": spots}
+    tmp = SPOTS_PATH + ".tmp"
+    with open(tmp, "w") as f:                 # atomic: never truncate the map
+        json.dump(doc, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, SPOTS_PATH)
     print(f"saved {args.spot} -> {SPOTS_PATH}")
 
 

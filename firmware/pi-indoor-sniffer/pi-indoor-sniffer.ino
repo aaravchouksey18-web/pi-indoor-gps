@@ -31,6 +31,9 @@ extern "C" {
 #ifndef PH_HOME_MS
 #define PH_HOME_MS 30000         // max time spent associating + reporting
 #endif
+#ifndef WIFI_RETRY_MS
+#define WIFI_RETRY_MS 5000       // re-issue WiFi.begin() this often while joining
+#endif
 
 // ---------------------------------------------------------------------------
 // in-RAM seen table, filled by the sniffer callback during a capture session.
@@ -130,8 +133,15 @@ static void ICACHE_RAM_ATTR on_packet(uint8_t *buf, uint16_t len) {
 
 // --- publish the captured sightings from the same boot's report phase ---------
 
-static void publish_seen() {
-  int sent = 0;
+static uint16_t pending_count() {
+  uint16_t n = 0;
+  for (int i = 0; i < SEEN_MAX; i++)
+    if (seen[i].last_seen != 0) n++;
+  return n;
+}
+
+static uint16_t publish_seen() {
+  uint16_t sent = 0;
   for (int i = 0; i < SEEN_MAX; i++) {
     if (seen[i].last_seen == 0) continue;      // nothing captured this session
     StaticJsonDocument<192> doc;
@@ -152,7 +162,21 @@ static void publish_seen() {
       seen[i].last_seen = 0;                   // delivered: don't resend this boot
     }
   }
-  if (sent) Serial.printf("published %d sightings\n", sent);
+  if (sent) Serial.printf("published %u sightings\n", sent);
+  return sent;
+}
+
+// The MQTT write only reaches the socket; the WiFi TCP TX queue needs a few
+// link-layer turns before ESP.restart wipes RAM. Loop a moment and report what
+// could not be flushed.
+static void drain_and_reboot() {
+  for (int attempt = 0; attempt < 10 && pending_count() > 0; attempt++) {
+    mqtt.loop();
+    delay(200);
+  }
+  Serial.printf("restarting (%u sightings left unsent)\n", pending_count());
+  delay(100);
+  ESP.restart();
 }
 
 // --- MQTT --------------------------------------------------------------------
@@ -171,6 +195,7 @@ static bool mqtt_connect() {
 enum { PH_HOME, PH_SNIFF };
 static uint8_t phase = PH_HOME;
 static uint32_t phase_until = 0;
+static uint32_t wifi_retry_at = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -208,18 +233,33 @@ void loop() {
       Serial.println("reporting...");
       phase = PH_HOME;
       phase_until = millis() + PH_HOME_MS;
-      WiFi.begin(WIFI_SSID, WIFI_PASS);   // fresh association for the report
+      wifi_retry_at = millis() + WIFI_RETRY_MS;   // (re)associate shortly
+      WiFi.begin(WIFI_SSID, WIFI_PASS);          // fresh association for the report
     }
     return;
   }
 
   // PH_HOME: associate + report, then reboot whatever happens.
+  // Association is async *and* can stall on a flaky AP; re-issue begin every
+  // WIFI_RETRY_MS until we're connected so a one-off failed join doesn't cost
+  // the whole session's captures.
+  if (phase == PH_HOME && WiFi.status() != WL_CONNECTED &&
+      millis() >= wifi_retry_at) {
+    Serial.printf("wifi status=%d, re-issuing begin\n", WiFi.status());
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    wifi_retry_at = millis() + WIFI_RETRY_MS;
+  }
+
   if (WiFi.status() == WL_CONNECTED && !mqtt.connected()) {
     digitalWrite(LED_BUILTIN, LOW);
     if (mqtt_connect()) {
       Serial.printf("mqtt connected to %s:%d\n", MQTT_HOST, MQTT_PORT);
-      mqtt.publish("indoor/online",
-                   "{\"board\":\"" BOARD_ID "\",\"online\":true}", true);
+      StaticJsonDocument<96> doc;
+      doc["board"] = BOARD_ID;
+      doc["online"] = true;
+      char online_msg[96];
+      serializeJson(doc, online_msg, sizeof(online_msg));
+      mqtt.publish("indoor/online", online_msg, true);
       digitalWrite(LED_BUILTIN, HIGH);
     }
   }
@@ -227,8 +267,6 @@ void loop() {
   publish_seen();                 // drains this boot's captures via MQTT
 
   if (millis() >= phase_until) {
-    Serial.println("restarting");
-    delay(100);
-    ESP.restart();
+    drain_and_reboot();
   }
 }

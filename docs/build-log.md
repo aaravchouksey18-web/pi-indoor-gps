@@ -71,3 +71,37 @@ Notes for real calibration:
   two+ nodes make the map discriminate direction, not just proximity.
 - Confidence/distances were perfect (1.0 / 0.0) only because injected values
   exactly matched fingerprint medians — real RSSI variance will lower them.
+
+## Fix pass — review-driven hardening (2026-09-26)
+
+All Pi-side tools and the firmware got a hardening pass from an independent
+review. Summary:
+
+- **collector.py** — now resubscribes on every MQTT connect (`on_connect`);
+  a broker restart previously left it permanently deaf with zero diagnostics.
+  Sightings are validated by a shared `messages.py` (shape, board, MAC
+  format, RSSI range) before touching any state, so hostile/malformed
+  payloads can't crash a collector or poison a fingerprint. New `--boards`
+  allowlist restricts which nodes are trusted, and `--min-boards` sets how
+  many fresh nodes an estimate requires. Broker-down at startup retries
+  forever with a warning instead of crashing.
+- **fingerprint.py** — matching no longer rewards partial fingerprints
+  (fixes "whichever spot happens to share one node wins"). A candidate must
+  have *full* coverage of its fingerprint's boards, stay within a distance
+  ceiling, and beat the runner-up by a margin; otherwise no estimate is
+  published. `best_match` returns a `Match` with `margin`/`boards`/units.
+  `load_spots` tolerates a missing/corrupt map.
+- **calibrate.py** — per-board minimum samples (`--min-per-board`, default 2)
+  with noisy boards dropped loudly, atomic spots.json writes
+  (tmp + fsync + rename), Ctrl-C aborts without writing, target MAC
+  validated+lowercased, `--seconds` floor of 5.
+- **inject.py** — publish `rc` checked per packet, optional `--jitter` to
+  simulate real RF variance, MAC validated, broker-down fails with a clear
+  message.
+- **firmware** — while joining, re-issues `WiFi.begin()` every 5 s so a
+  stalled association can't eat a session; before the end-of-cycle restart
+  it drains the MQTT socket and reports sightings that couldn't leave;
+  `online:true` now uses the same serializer as the LWT (cosmetic). Single
+  channel + delivery semantics documented in `firmware/README.md`, along with
+  the pinned library versions (ArduinoJson 6.21.5, PubSubClient 2.8).
+- `requirements.txt` added (`paho-mqtt>=2.0,<3`).

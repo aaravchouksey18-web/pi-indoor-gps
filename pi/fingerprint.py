@@ -2,47 +2,92 @@
 
 A "fingerprint" is a per-spot vector: {board: rssi}. A live vector from the
 collector is matched against the map over the boards both sides share, using
-plain Euclidean distance on the RSSI in dBm. The closest spot wins; confidence
-is a soft 1/(1+d) so it degrades gracefully with distance.
+plain Euclidean distance on the RSSI in dBm.
+
+Matching policy (the parts that keep estimates honest):
+
+  * **Full coverage** — a spot candidate must see *every* board its
+    fingerprint records. A 1-board fingerprint can no longer win against a
+    2-board one just because it happens to share one node; partial matches
+    are dropped, not scored.
+  * **Distance ceiling** — beyond MAX_DIST_DB the measured vector is too far
+    from any spot to claim one.
+  * **Margin** — the best spot must beat the runner-up by MIN_MARGIN_DB,
+    otherwise the answer is ambiguous and we refuse to publish instead of
+    guessing between two similar spots.
 """
 import json
 import os
+from collections import namedtuple
 
 SPOTS_PATH = os.path.join(os.path.dirname(__file__), "spots.json")
 
+# squared-Euclidean distance ceiling for a "real" match (in dBm²), and the
+# margin the winner must hold over the runner-up to be unambiguous.
+MAX_DIST_DB = 48.0
+MIN_MARGIN_DB = 2.5
+
+Match = namedtuple("Match", "spot distance confidence margin boards")
+
 
 def load_spots(path=SPOTS_PATH):
-    """Return {spot_name: {board: rssi}} from the JSON map ({} if missing)."""
+    """Return {spot_name: {board: rssi}} from the JSON map ({} if missing).
+
+    Never raises: a missing or corrupted spots.json means "no map yet",
+    which the caller already treats as no match.
+    """
     if not os.path.exists(path):
         return {}
-    with open(path) as f:
-        return json.load(f).get("spots", {})
+    try:
+        with open(path) as f:
+            return json.load(f).get("spots", {}) or {}
+    except (OSError, ValueError):
+        return {}
 
 
 def compute_distances(live, spots):
-    """Match a live {board: rssi} vector. Returns sorted [(spot, distance)]. """
+    """Score live vs every fingerprint that has FULL coverage.
+
+    Returns sorted [(spot, distance, boards_matched)] or [].
+    """
     scored = []
     for name, fp in spots.items():
         fp_boards = {k: v for k, v in fp.items() if k != "_meta"}
-        common = [b for b in live if b in fp_boards]
-        if not common:
+        if not fp_boards:
             continue
-        d = sum((live[b] - fp_boards[b]) ** 2 for b in common) ** 0.5
-        scored.append((name, d, len(common)))
+        common = [b for b in live if b in fp_boards]
+        if len(common) < len(fp_boards):    # incomplete fingerprint: no credit
+            continue
+        d = sum((live[b] - fp_boards[b]) ** 2 for b in common)
+        dist = d ** 0.5
+        scored.append((name, round(dist, 2), len(common)))
     scored.sort(key=lambda t: t[1])
     return scored
 
 
-def best_match(live, spots=None):
-    """Return (spot, distance, confidence) or (None, None, None) if no match."""
+def best_match(live, spots=None, max_dist_db=MAX_DIST_DB,
+               min_margin_db=MIN_MARGIN_DB):
+    """Return a Match, or Match(None, None, None, None, 0) if no honest match.
+
+    `live` is a {board: rssi} vector from the collector; `spots` defaults to
+    the on-disk fingerprint map.
+    """
     spots = spots if spots is not None else load_spots()
     if not live or not spots:
-        return None, None, None
+        return Match(None, None, None, None, 0)
     scored = compute_distances(live, spots)
     if not scored:
-        return None, None, None
-    name, d, _ = scored[0]
-    return name, d, 1.0 / (1.0 + d)
+        return Match(None, None, None, None, 0)
+    name, dist, boards = scored[0]
+    if dist > max_dist_db:
+        return Match(None, None, None, None, 0)
+    margin = None
+    if len(scored) > 1:
+        margin = round(scored[1][1] - dist, 2)
+        if margin < min_margin_db:
+            return Match(None, None, None, None, 0)     # ambiguous
+    confidence = round(1.0 / (1.0 + dist), 3)
+    return Match(name, dist, confidence, margin, boards)
 
 
 def format_vector(live):
@@ -54,5 +99,10 @@ if __name__ == "__main__":
 
     # tiny self-check against the example map
     sample = {"a": -58, "b": -70}
-    print("example spots:", best_match(sample))
+    m = best_match(sample)
+    print("example spots:", m)
+    # a partial (1-of-2 board) vector must NOT win any match now
+    one_board = {"a": -58}
+    m2 = best_match(one_board)
+    print("partial-coverage match:", m2, "-> should be None/empty")
     sys.exit(0)
