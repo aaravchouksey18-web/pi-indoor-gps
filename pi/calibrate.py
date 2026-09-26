@@ -30,7 +30,8 @@ def main():
     ap.add_argument("--seconds", type=int, default=60)
     ap.add_argument("--host", default=os.environ.get("MQTT_HOST", "localhost"))
     ap.add_argument("--port", type=int, default=1883)
-    ap.add_argument("--min-samples", type=int, default=8)
+    ap.add_argument("--min-samples", type=int, default=3,
+                    help="minimum TOTAL RSSI samples collected across nodes")
     args = ap.parse_args()
 
     samples = {}  # board -> [rssi...]
@@ -55,12 +56,14 @@ def main():
     mqttc.loop_stop()
 
     vec = median_per_board(samples)
+    total = sum(len(v) for v in samples.values())
     print("raw per-board samples:", json.dumps(
         {b: len(v) for b, v in samples.items()}))
     print("median vector:", json.dumps(vec))
 
-    if len(vec) < args.min_samples or not vec:
-        print(f"aborted: need >= {args.min_samples} distinct boards with samples")
+    if not samples or total < args.min_samples:
+        print(f"aborted: {total} samples across {len(vec)} node(s); "
+              f"need >= {args.min_samples} total")
         return
 
     spots = {}
