@@ -51,7 +51,9 @@ def parse_sighting(payload_bytes):
     rssi = p.get("rssi")
     try:
         rssi = int(rssi)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # 1e999 / Infinity JSON values parse to float inf: int() raises
+        # OverflowError there, not ValueError, and must not kill the caller
         return None
     if not -150 <= rssi <= 0:
         return None

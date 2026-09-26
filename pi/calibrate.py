@@ -44,13 +44,21 @@ def load_existing_spots():
         return {}
     try:
         with open(SPOTS_PATH) as f:
-            return json.load(f).get("spots", {}) or {}
+            raw = json.load(f)
     except (OSError, ValueError):
         # never silently replace a corrupt map with {} and then overwrite it
         # with one new spot — the existing fingerprints must be preserved
         print(f"error: {SPOTS_PATH} is unreadable/corrupt — refusing to "
               "overwrite it; fix or remove the file first", flush=True)
         sys.exit(1)
+    spots = raw.get("spots", {}) if isinstance(raw, dict) else None
+    if not isinstance(spots, dict):
+        # valid JSON that is not a {"spots": {...}} map (list / string /
+        # number / null) is just as destructive if overwritten — abort too
+        print(f"error: {SPOTS_PATH} has no spots map — refusing to overwrite "
+              "it; fix or remove the file first", flush=True)
+        sys.exit(1)
+    return spots
 
 
 def main(argv=None):
@@ -91,6 +99,10 @@ def main(argv=None):
         # paho's auto-reconnect does NOT restore subscriptions: without this,
         # a broker restart or WiFi blip mid-window would silently collect
         # nothing and then overwrite the spot with a half-measured sample.
+        if reason_code != 0:
+            print(f"calibrate: connect refused (reason_code={reason_code}); "
+                  f"not subscribed", flush=True)
+            return
         client.subscribe("indoor/sighting")
         print("calibrate: connected; subscribed to indoor/sighting",
               flush=True)
@@ -104,7 +116,7 @@ def main(argv=None):
             break
         except OSError as e:
             print(f"warning: broker {args.host}:{args.port} unavailable "
-                  f"({e}); retrying in 5 s", flush=True)
+                  f"({e}); retrying in 5 s (Ctrl-C to abort)", flush=True)
             time.sleep(5)
     mqttc.loop_start()
 
@@ -123,7 +135,7 @@ def main(argv=None):
         return True
 
     if not wait_for_window():
-        return
+        return 1
     mqttc.loop_stop()
 
     total = sum(len(v) for v in samples.values())
@@ -133,7 +145,7 @@ def main(argv=None):
     if not samples or total < args.min_samples:
         print(f"aborted: {total} samples across {len(samples)} node(s); "
               f"need >= {args.min_samples} total", flush=True)
-        return
+        return 1
 
     dropped = {b: n for b, n in per_board.items() if n < args.min_per_board}
     kept = {b for b in samples if b not in dropped}
@@ -143,13 +155,13 @@ def main(argv=None):
     if not kept:
         print(f"aborted: every board has fewer than {args.min_per_board} "
               "samples; collect longer", flush=True)
-        return
+        return 1
 
     vec = median_per_board({b: samples[b] for b in kept})
     print("median vector:", json.dumps(vec))
     if not vec:
         print("aborted: no usable samples", flush=True)
-        return
+        return 1
 
     spots = load_existing_spots()
     spots[args.spot] = dict(vec, _meta={"samples": args.seconds,
@@ -164,7 +176,8 @@ def main(argv=None):
         os.fsync(f.fileno())
     os.replace(tmp, SPOTS_PATH)
     print(f"saved {args.spot} -> {SPOTS_PATH}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

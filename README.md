@@ -40,8 +40,8 @@ when *every* board its fingerprint records has reported a fresh RSSI (no
 partial-credit "1-board spot beats a 2-board spot"), when the measured vector
 is within a distance ceiling, and when the best spot beats the runner-up by a
 margin — otherwise no `indoor/estimate` is published. The estimate payload
-carries `units:"dB"` for its `distance`, plus `confidence` and `margin`, so a
-dashboards can't mistake the RSSI distance for metres.
+carries `units:"dB distance"` for its `distance`, plus `confidence` and
+`margin`, so a dashboard can't mistake the RSSI distance for metres.
 
 ## Layout
 

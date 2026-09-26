@@ -17,6 +17,7 @@ Matching policy (the parts that keep estimates honest):
     guessing between two similar spots.
 """
 import json
+import math
 import os
 from collections import namedtuple
 
@@ -30,23 +31,13 @@ MIN_MARGIN_DB = 2.5
 Match = namedtuple("Match", "spot distance confidence margin boards")
 
 
-def load_spots(path=SPOTS_PATH):
-    """Return {spot_name: {board: rssi}} from the JSON map ({} if missing).
+def _sanitize_spots(spots):
+    """Keep only {board: finite float} fingerprints from a loaded map.
 
-    Never raises: a missing or corrupted spots.json means "no map yet",
-    which the caller already treats as no match. Spot records that are not
-    {board: rssi} dicts (e.g. from a hand-edit) are dropped, and only finite
-    numeric RSSI values are kept, so a malformed map file can never crash a
-    collector inside an MQTT callback.
+    Never raises: spot records that are not dicts, boards named "_meta",
+    and any rssi that does not coerce to a finite float (including huge
+    integer literals, Infinity and NaN) are dropped.
     """
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path) as f:
-            raw = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    spots = raw.get("spots") if isinstance(raw, dict) else None
     if not isinstance(spots, dict):
         return {}
     out = {}
@@ -59,13 +50,32 @@ def load_spots(path=SPOTS_PATH):
                 continue
             try:
                 value = float(rssi)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
-            if value == value and value != float("inf") and value != float("-inf"):
+            if math.isfinite(value):
                 clean[board] = value
         if clean:
             out[name] = clean
     return out
+
+
+def load_spots(path=SPOTS_PATH):
+    """Return {spot_name: {board: rssi}} from the JSON map ({} if missing).
+
+    Never raises: a missing or corrupted spots.json means "no map yet",
+    which the caller already treats as no match. The returned map is fully
+    sanitized (see _sanitize_spots), so State() and the matcher can always
+    assume plain finite floats.
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    spots = raw.get("spots") if isinstance(raw, dict) else None
+    return _sanitize_spots(spots)
 
 
 def compute_distances(live, spots):
@@ -93,9 +103,9 @@ def best_match(live, spots=None, max_dist_db=MAX_DIST_DB,
     """Return a Match, or Match(None, None, None, None, 0) if no honest match.
 
     `live` is a {board: rssi} vector from the collector; `spots` defaults to
-    the on-disk fingerprint map.
+    the on-disk fingerprint map and is sanitized either way.
     """
-    spots = spots if spots is not None else load_spots()
+    spots = _sanitize_spots(spots) if spots is not None else load_spots()
     if not live or not spots:
         return Match(None, None, None, None, 0)
     scored = compute_distances(live, spots)
@@ -120,12 +130,16 @@ def format_vector(live):
 if __name__ == "__main__":
     import sys
 
-    # tiny self-check against the example map
+    # tiny self-check vs the checked-in example map (spots.json is
+    # gitignored; spots.json.example is the shape reference)
+    example = os.path.join(os.path.dirname(__file__), "spots.json.example")
+    spots = load_spots(example)
+    print("example spots:", spots)
     sample = {"a": -58, "b": -70}
-    m = best_match(sample)
-    print("example spots:", m)
+    m = best_match(sample, spots=spots)
+    print("example match:", m)
     # a partial (1-of-2 board) vector must NOT win any match now
     one_board = {"a": -58}
-    m2 = best_match(one_board)
+    m2 = best_match(one_board, spots=spots)
     print("partial-coverage match:", m2, "-> should be None/empty")
-    sys.exit(0)
+    sys.exit(0 if (m.spot and m2.spot is None) else 1)

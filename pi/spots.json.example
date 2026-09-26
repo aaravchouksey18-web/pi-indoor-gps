@@ -4,12 +4,14 @@
     "living-room": {
       "a": -58,
       "b": -72,
-      "_meta": { "samples": 60, "device": "aa:bb:cc:dd:ee:ff", "count": 42 }
+      "_meta": { "samples": 60, "device": "aa:bb:cc:dd:ee:ff",
+                  "count": 42, "per_board": { "a": 21, "b": 21 } }
     },
     "desk": {
       "a": -46,
       "b": -88,
-      "_meta": { "samples": 60, "device": "aa:bb:cc:dd:ee:ff", "count": 38 }
+      "_meta": { "samples": 60, "device": "aa:bb:cc:dd:ee:ff",
+                  "count": 38, "per_board": { "a": 21, "b": 17 } }
     }
   }
 }

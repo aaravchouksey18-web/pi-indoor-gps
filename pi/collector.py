@@ -76,6 +76,10 @@ def make_client(state, min_boards=1):
     def on_connect(client, userdata, flags, reason_code, properties=None):
         # paho's auto-reconnect does NOT restore subscriptions: without this,
         # a broker restart would silently kill every estimate.
+        if reason_code != 0:
+            print(f"collector: connect refused (reason_code={reason_code}); "
+                  f"not subscribed", flush=True)
+            return
         client.subscribe(TOPIC_SIGHTING)
         print("collector: connected; subscribed to indoor/sighting", flush=True)
 
@@ -155,7 +159,7 @@ def main(argv=None):
             break
         except OSError as e:
             print(f"warning: broker {args.host}:{args.port} unavailable "
-                  f"({e}); retrying in 5 s", flush=True)
+                  f"({e}); retrying in 5 s (Ctrl-C to abort)", flush=True)
             time.sleep(5)
     print(f"collector on {args.host}:{args.port}, target={target or 'any'}")
     mqttc.loop_forever()

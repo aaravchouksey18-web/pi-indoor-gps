@@ -53,6 +53,24 @@ class LoadSpotsTest(unittest.TestCase):
             spots = fingerprint.load_spots(path)
             self.assertEqual(spots, {"good": {"a": -58.0}})
 
+    def test_huge_integer_literal_never_raises(self):
+        # an unquoted 400-digit integer in spots.json reaches float() and
+        # raises OverflowError unless caught; must be dropped, not thrown
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "spots.json")
+            with open(path, "w") as fh:
+                fh.write('{"spots": {"kitchen": {"a": ' + "9" * 400 + "}}}")
+            self.assertEqual(fingerprint.load_spots(path), {})
+
+    def test_best_match_sanitizes_hostile_raw_map(self):
+        # best_match() with a hand-built map must not trust it blindly
+        m = fingerprint.best_match({"a": -58},
+                                   spots={"s": {"a": "near"}, "list": ["x"]})
+        self.assertIsNone(m.spot)
+        m = fingerprint.best_match(
+            {"a": -58}, spots={"s": {"a": "123456789" * 60}})
+        self.assertIsNone(m.spot)
+
     def test_best_match_never_crashes_on_hostile_map(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_map(tmp, {"hall": 5, "kitchen": {"a": "near"}})
@@ -102,6 +120,14 @@ class MessagesTest(unittest.TestCase):
         s = messages.parse_sighting(payload.encode())
         self.assertEqual(s["mac"], "aa:bb:cc:dd:ee:ff")
         self.assertEqual(s["rssi"], -45)
+
+    def test_infinite_rssi_rejected_not_crash(self):
+        # JSON 1e999 / -1e999 parse to float inf; int() then raises
+        # OverflowError (not ValueError) and must be rejected, not thrown
+        for rssi in (1e999, -1e999):
+            payload = json.dumps({"board": "a", "mac": "aa:bb:cc:dd:ee:ff",
+                                  "rssi": rssi})
+            self.assertIsNone(messages.parse_sighting(payload.encode()))
 
     def test_bad_mac_rejected(self):
         for mac in ("nope", "aa:bb:cc:dd:ee", "AA:BB:CC:DD:EE:FF:00"):
