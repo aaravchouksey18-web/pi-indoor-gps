@@ -290,11 +290,14 @@ void loop() {
       doc["online"] = true;
       char online_msg[96];
       serializeJson(doc, online_msg, sizeof(online_msg));
-      // same QoS (1) and retained flag as the LWT so broker-side ordering
-      // between the two is defined — a stale heartbeat must never arrive
-      // after a death LWT and resurrect the retained "online" flag
+      // same retained flag and per-node topic as the LWT so a death LWT can
+      // never be hidden by a stale live heartbeat. PubSubClient only
+      // exercises QoS 0 for regular publishes (QoS is honored for the LWT,
+      // set during connect, and for subscriptions) — the per-node topic +
+      // retained flag is what keeps broker-side ordering sane, and a fresh
+      // heartbeat simply overwrites the retained value each connect.
       mqtt.publish(ONLINE_TOPIC, (const uint8_t *)online_msg,
-                   strlen(online_msg), 1, true);
+                   strlen(online_msg), true);
       digitalWrite(LED_BUILTIN, HIGH);
     }
   }

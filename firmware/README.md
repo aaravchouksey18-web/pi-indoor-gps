@@ -48,11 +48,14 @@ Please don't "upgrade" ArduinoJson to v7 in a local edit — v7 dropped
   (unconditionally, for the full drain window) before the restart that ends
   every cycle, reporting any sightings that couldn't leave.
 - The heartbeat and the LWT both live on a **per-node** topic
-  `indoor/online/<board>` (retained; LWT `online:false` publishes here too),
-  at the same QoS 1 — sharing one flat `indoor/online` across the fleet would
-  let the last publisher hide every other node, and a dead node's retained LWT
-  would overwrite a live node's retained heartbeat. Subscribe to
-  `indoor/online/+` on the hub to see the whole fleet.
+  `indoor/online/<board>` (retained; LWT `online:false` publishes here too) —
+  sharing one flat `indoor/online` across the fleet would let the last
+  publisher hide every other node, and a dead node's retained LWT would
+  overwrite a live node's retained heartbeat. The LWT is sent with QoS 1
+  (set during connect); the live heartbeat is a regular retained publish,
+  which PubSubClient can only send at QoS 0 — the per-node topic plus the
+  retained flag is what keeps the two from clobbering each other. Subscribe
+  to `indoor/online/+` on the hub to see the whole fleet.
 
 ## Note
 
