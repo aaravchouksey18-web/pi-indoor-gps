@@ -59,6 +59,11 @@ def main(argv=None):
     board = (args.board or "").strip()
     if not board or board == "_meta":
         ap.error("--board must be a non-empty id (and not \"_meta\")")
+    if len(board) > 16:
+        # mirror messages.py's 16-char cap and the firmware static_assert:
+        # a longer board id publishes sightings NOBODY accepts
+        ap.error("--board must be at most 16 chars (the collector and "
+                 "firmware both enforce this cap)")
     args.board = board
 
     mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -67,7 +72,8 @@ def main(argv=None):
         print("mqtt auth: username configured", flush=True)
     try:
         mqttc.connect(args.host, args.port, 30)
-    except OSError as e:
+    except (OSError, ValueError) as e:
+        # ValueError covers paho's "Invalid host." for e.g. MQTT_HOST=""
         sys.exit(f"cannot reach broker {args.host}:{args.port}: {e}")
     mqttc.loop_start()
 
@@ -89,8 +95,17 @@ def main(argv=None):
         else:
             sent += 1
         time.sleep(args.interval)
+    # paho's loop thread does the actual socket write in the background: rc
+    # == SUCCESS only means "queued in the client", so give it a moment to
+    # flush before tearing the loop down (a fast --interval used to lose the
+    # last packets while the summary still claimed "delivered N/M").
+    time.sleep(max(0.3, args.interval))
     mqttc.loop_stop()
-    print(f"[inject] delivered {sent}/{args.count}", flush=True)
+    try:
+        mqttc.disconnect()
+    except OSError:
+        pass  # broker already gone; nothing left to flush
+    print(f"[inject] queued {sent}/{args.count} to the broker", flush=True)
 
 
 if __name__ == "__main__":

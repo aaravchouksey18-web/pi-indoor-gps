@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
-"""Tests for pi/fingerprint.py + pi/messages.py (stdlib-only; run with
-python3 -m pytest tests/ or python3 tests/test_pi.py)."""
+"""Tests for the pi/ scripts (stdlib-only: python3 tests/test_pi.py, or
+python3 -m unittest discover -s tests)."""
 
 import json
 import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pi"))
 
 import fingerprint  # noqa: E402
 import messages    # noqa: E402
+import collector   # noqa: E402
 
 
 def write_map(tmp, spots):
     with open(os.path.join(tmp, "spots.json"), "w") as fh:
         json.dump({"spots": spots}, fh)
     return os.path.join(tmp, "spots.json")
+
+
+def sighting(board="a", mac="aa:bb:cc:dd:ee:ff", rssi=-45):
+    """A payload shaped exactly like the firmware's serializeJson() output."""
+    return json.dumps({"board": board, "mac": mac, "rssi": rssi}).encode()
 
 
 class LoadSpotsTest(unittest.TestCase):
@@ -29,6 +37,16 @@ class LoadSpotsTest(unittest.TestCase):
             path = os.path.join(tmp, "spots.json")
             with open(path, "w") as fh:
                 fh.write("{ not json")
+            self.assertEqual(fingerprint.load_spots(path), {})
+
+    def test_deeply_nested_corrupt_map_never_raises(self):
+        # json.load() of a deeply nested missing-the-map file can hit the
+        # interpreter recursion limit (RecursionError) — for the local map
+        # that must still mean "no map", not "collector died".
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "spots.json")
+            with open(path, "w") as fh:
+                fh.write('{"spots": ' + "[" * 1200 + "]" * 1200 + "}")
             self.assertEqual(fingerprint.load_spots(path), {})
 
     def test_bad_top_level_is_ignored(self):
@@ -140,6 +158,34 @@ class MatchingTest(unittest.TestCase):
         self.assertIsNone(ok.reason)
         self.assertEqual(ok.spot, "y")
 
+    def test_partial_fleet_refused(self):
+        # loop-6 B1: under exact-set equality a 1-board live vector can only
+        # be scored against the 1-board spot, so that narrow spot becomes the
+        # SOLE candidate and would "win" with confidence 1.0 and no margin
+        # check while every wider spot silently sits out. That must be
+        # refused ("partial_fleet") instead of published.
+        spots = {"living": {"a": -58, "b": -72}, "desk": {"a": -46, "b": -88},
+                 "narrow": {"a": -50}}
+        m = fingerprint.best_match({"a": -60}, spots=spots)
+        self.assertIsNone(m.spot)
+        self.assertEqual(m.reason, "partial_fleet")
+        m = fingerprint.best_match({"a": -60, "b": -72}, spots=spots)
+        self.assertIsNone(m.reason)          # full fleet still matches
+        self.assertEqual(m.spot, "living")
+        # a map with NO narrow spot has no candidate for a 1-board vector at
+        # all — that stays plain "coverage", not a fleet-width problem
+        self.assertEqual(fingerprint.best_match(
+            {"a": -60}, spots={"living": {"a": -58, "b": -72}}).reason,
+            "coverage")
+
+    def test_partial_fleet_allows_equal_width_map(self):
+        # a map where EVERY spot is 1-board has width 1, so a 1-board vector
+        # is the full fleet for that map and must keep matching
+        spots = {"desk": {"a": -45}, "couch": {"a": -75}}
+        m = fingerprint.best_match({"a": -50}, spots=spots)
+        self.assertIsNone(m.reason)
+        self.assertEqual(m.spot, "desk")
+
     def test_distance_is_euclidean_not_squared(self):
         spots = {"s": {"a": -58}}
         scored = fingerprint.compute_distances({"a": -62}, spots)
@@ -209,6 +255,151 @@ class MessagesTest(unittest.TestCase):
         self.assertEqual(messages.parse_sighting(payload.encode())["board"],
                          "kitchen")
 
+    def test_oversized_payload_rejected_before_parse(self):
+        # loop-6 B2: a payload over MAX_SIGHTING_BYTES is rejected before any
+        # json parsing — this is what makes the cheap "any LAN host can kill
+        # the collector" DoS impossible, and it also caps parse memory.
+        big = b" " * (messages.MAX_SIGHTING_BYTES + 1) + sighting()
+        self.assertIsNone(messages.parse_sighting(big))
+
+    def test_deeply_nested_under_cap_is_rejected_not_throw(self):
+        # nested-but-small payloads parse fine as JSON but are not dicts;
+        # under the size cap that is the (safe) path — must return None,
+        # never raise (RecursionError would be a RuntimeError and was NOT
+        # caught in earlier loops, letting paho re-raise and kill daemons).
+        nested = b"[" * 200 + b"0" + b"]" * 200
+        self.assertEqual(len(nested), 401)  # 200 brackets + "0" + 200 brackets
+        self.assertLess(len(nested), messages.MAX_SIGHTING_BYTES)
+        self.assertIsNone(messages.parse_sighting(nested))
+
+    def test_non_dict_and_none_payloads(self):
+        for raw in (None, b"null", b"[1,2]", b'"str"', b"", b"nope"):
+            self.assertIsNone(messages.parse_sighting(raw))
+
+    def test_firmware_payload_contract(self):
+        # the payload the .ino actually builds (board/mac/rssi/rssi_n and an
+        # optional ssid, lowercase colon MAC) must round-trip the collector —
+        # a firmware-side rename would otherwise break the pipeline with zero
+        # test failures.
+        payload = json.dumps({"board": "a", "mac": "aa:bb:cc:dd:ee:ff",
+                              "ssid": "homewifi", "rssi": -58, "rssi_n": 12})
+        s = messages.parse_sighting(payload.encode())
+        self.assertEqual(s, {"board": "a", "mac": "aa:bb:cc:dd:ee:ff",
+                             "rssi": -58})
+
+
+class CollectorStateTest(unittest.TestCase):
+    """Collector.State windowing + the on_message estimate path."""
+
+    def _state(self):
+        st = collector.State(target="aa:bb:cc:dd:ee:ff", boards=None)
+        st.spots = {}  # decouple from any on-disk spots.json
+        return st
+
+    def test_prune_drops_stale_nodes_only(self):
+        st = self._state()
+        base = 1000.0
+        with mock.patch("collector.time.monotonic", return_value=base):
+            st.nodes["a"] = {"11:22:33:44:55:66": {"rssi": -45,
+                                                   "ts": base - 10}}
+            st.nodes["b"] = {"22:33:44:55:66:77": {"rssi": -50,
+                                                   "ts": base - collector.WINDOW_S - 1}}
+        with mock.patch("collector.time.monotonic", return_value=base):
+            st.prune()
+        self.assertIn("a", st.nodes)
+        self.assertNotIn("b", st.nodes)
+
+    def test_window_boundary_inclusive(self):
+        # exactly WINDOW_S old is still fresh; one step older is stale
+        st = self._state()
+        base = 1000.0
+        with mock.patch("collector.time.monotonic", return_value=base):
+            st.nodes["a"] = {"aa:bb:cc:dd:ee:ff": {"rssi": -45,
+                                                   "ts": base - collector.WINDOW_S}}
+            vec = st.live_vector("aa:bb:cc:dd:ee:ff")
+        self.assertEqual(vec, {"a": -45})
+        with mock.patch("collector.time.monotonic", return_value=base):
+            st.nodes["a"]["aa:bb:cc:dd:ee:ff"]["ts"] = \
+                base - collector.WINDOW_S - 0.001
+            vec = st.live_vector("aa:bb:cc:dd:ee:ff")
+        self.assertEqual(vec, {})
+
+    def test_on_message_publishes_estimate_once_fleet_is_full(self):
+        st = self._state()
+        st.spots = {"living": {"a": -58.0, "b": -72.0}}
+        mqttc = collector.make_client(st, min_boards=1)
+        calls = []
+        mqttc.publish = lambda topic, payload: (
+            calls.append((topic, json.loads(payload))), SimpleNamespace(rc=0))[1]
+        # board a only -> vec is 1-board, map's widest spot is 2-board:
+        # partial_fleet, must NOT publish (that was the loop-6 B1 hole)
+        mqttc.on_message(mqttc, None, SimpleNamespace(payload=sighting("a")))
+        self.assertEqual(calls, [])
+        # board b arrives -> full 2-board vector -> a real estimate
+        mqttc.on_message(mqttc, None,
+                         SimpleNamespace(payload=sighting("b", rssi=-72)))
+        self.assertEqual(len(calls), 1)
+        topic, est = calls[0]
+        self.assertEqual(topic, collector.TOPIC_ESTIMATE)
+        self.assertEqual(est["spot"], "living")
+        self.assertEqual(est["matched_boards"], 2)
+        self.assertEqual(est["board"], "b")
+        self.assertEqual(est["units"], "dB distance")
+
+    def test_on_message_rejects_partial_fleet_without_publish(self):
+        # a genuinely narrow measurement (1 fresh board against a 2-board
+        # map) covers the reason-string mapping end to end: refusal, not NaN
+        st = self._state()
+        st.spots = {"living": {"a": -58.0, "b": -72.0}}
+        mqttc = collector.make_client(st, min_boards=1)
+        calls = []
+        mqttc.publish = lambda topic, payload: (
+            calls.append(topic), SimpleNamespace(rc=0))[1]
+        mqttc.on_message(mqttc, None, SimpleNamespace(payload=sighting("a")))
+        self.assertEqual(calls, [])
+        # a non-target node's sighting must never trigger estimates either
+        mqttc.on_message(mqttc, None,
+                         SimpleNamespace(payload=sighting("b",
+                                                          mac="11:22:33:44:55:66")))
+        self.assertEqual(calls, [])
+
+
+class CalibrateFileTest(unittest.TestCase):
+    """calibrate.load_existing_spots() — the "never corrupt the map" guard."""
+
+    def _path(self, tmp, content=None, raw=None):
+        p = os.path.join(tmp, "spots.json")
+        if raw is not None:
+            with open(p, "w") as fh:
+                fh.write(raw)
+        elif content is not None:
+            with open(p, "w") as fh:
+                json.dump(content, fh)
+        return p
+
+    def test_missing_file_is_empty(self):
+        import calibrate
+        with mock.patch.object(calibrate, "SPOTS_PATH", "/nonexistent/st.json"):
+            self.assertEqual(calibrate.load_existing_spots(), {})
+
+    def test_corrupt_file_exits_1(self):
+        import calibrate
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._path(tmp, raw="{ nope")
+            with mock.patch.object(calibrate, "SPOTS_PATH", p), \
+                    self.assertRaises(SystemExit) as cm:
+                calibrate.load_existing_spots()
+            self.assertEqual(cm.exception.code, 1)
+
+    def test_non_map_top_level_exits_1(self):
+        import calibrate
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._path(tmp, content=["a", "list"])
+            with mock.patch.object(calibrate, "SPOTS_PATH", p), \
+                    self.assertRaises(SystemExit) as cm:
+                calibrate.load_existing_spots()
+            self.assertEqual(cm.exception.code, 1)
+
 
 class ArgGateTest(unittest.TestCase):
     """CLI arg gates the pass-5 review added (each must exit with code 2)."""
@@ -230,6 +421,16 @@ class ArgGateTest(unittest.TestCase):
                          "--target", "aa:bb:cc:dd:ee:ff")
         self.assertEqual(r.returncode, 2)
 
+    def test_calibrate_rejects_min_samples_zero(self):
+        r = self.run_cli("calibrate.py", "--spot", "kitchen",
+                         "--target", "aa:bb:cc:dd:ee:ff", "--min-samples", "0")
+        self.assertEqual(r.returncode, 2)
+
+    def test_calibrate_rejects_min_per_board_zero(self):
+        r = self.run_cli("calibrate.py", "--spot", "kitchen",
+                         "--target", "aa:bb:cc:dd:ee:ff", "--min-per-board", "0")
+        self.assertEqual(r.returncode, 2)
+
     def test_inject_rejects_bad_interval(self):
         r = self.run_cli("inject.py", "--target", "aa:bb:cc:dd:ee:ff",
                          "--rssi", "-45", "--interval", "0")
@@ -238,6 +439,12 @@ class ArgGateTest(unittest.TestCase):
     def test_inject_rejects_meta_board(self):
         r = self.run_cli("inject.py", "--target", "aa:bb:cc:dd:ee:ff",
                          "--rssi", "-45", "--board", "_meta")
+        self.assertEqual(r.returncode, 2)
+
+    def test_inject_rejects_overlong_board(self):
+        # mirror of the firmware static_assert: nobody accepts a 17-char id
+        r = self.run_cli("inject.py", "--target", "aa:bb:cc:dd:ee:ff",
+                         "--rssi", "-45", "--board", "x" * 17)
         self.assertEqual(r.returncode, 2)
 
 

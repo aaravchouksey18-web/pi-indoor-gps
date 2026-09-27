@@ -16,6 +16,12 @@ Matching policy (the parts that keep estimates honest):
   * **Margin** — the best spot must beat the runner-up by MIN_MARGIN_DB,
     otherwise the answer is ambiguous and we refuse to publish instead of
     guessing between two similar spots.
+  * **Fleet width** — a live vector narrower than the map's widest spot is
+    refused (reason "partial_fleet"). Exact-set equality means a 1-board
+    spot can only ever be scored against a 1-board live vector, so without
+    this it would win as the *sole candidate* with a perfect-looking 1.0
+    confidence and no margin check, while every wider spot silently sits out
+    the comparison. Fewer boards live = nodes are missing, not a match.
 """
 import json
 import math
@@ -73,7 +79,7 @@ def load_spots(path=SPOTS_PATH):
     try:
         with open(path) as f:
             raw = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError, MemoryError):
         return {}
     spots = raw.get("spots") if isinstance(raw, dict) else None
     return _sanitize_spots(spots)
@@ -115,7 +121,8 @@ def best_match(live, spots=None, max_dist_db=MAX_DIST_DB,
 
     `reason` describes how the refusal happened so the collector can give a
     useful diagnostic: "no_live" / "no_map" / "coverage" (no candidate
-    explains every live board) / "distance" / "ambiguous" / None on success.
+    explains every live board) / "partial_fleet" (live vector narrower than
+    the map's widest spot) / "distance" / "ambiguous" / None on success.
 
     `live` is a {board: rssi} vector from the collector; `spots` defaults to
     the on-disk fingerprint map and is sanitized either way.
@@ -129,6 +136,13 @@ def best_match(live, spots=None, max_dist_db=MAX_DIST_DB,
     if not scored:
         return Match(None, None, None, None, 0, "coverage")
     name, dist, boards = scored[0]
+    # A winner that covers fewer boards than the map's widest spot is a
+    # *narrow* fingerprint: exact-set equality means the wider spots were
+    # never scored against this vector, so this is the sole candidate and
+    # would "win" with a perfect confidence and no runner-up at all. That is
+    # not a verified answer — it is a half-flown fleet. Refuse instead.
+    if boards < max(len(fp) for fp in spots.values()):
+        return Match(None, None, None, None, 0, "partial_fleet")
     if not math.isfinite(dist) or dist > max_dist_db:
         # inf from the diff*diff overflow above is a "distance", not a crash
         return Match(None, None, None, None, 0, "distance")

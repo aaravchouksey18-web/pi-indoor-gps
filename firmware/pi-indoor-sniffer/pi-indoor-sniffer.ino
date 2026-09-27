@@ -23,6 +23,13 @@ extern "C" {
 static_assert(sizeof(BOARD_ID) <= 17, "BOARD_ID must be <= 16 chars "
               "(the Pi collector drops longer board ids)");
 
+// Per-node online/heartbeat topic. The LWT and the live heartbeat MUST live
+// on a topic that carries this node's board id: sharing one flat
+// "indoor/online" across a 2+ node fleet means the last publisher's retained
+// message hides every other node, and a dead node's retained LWT overwrites
+// a live node's retained heartbeat (the whole fleet then looks dead).
+#define ONLINE_TOPIC "indoor/online/" BOARD_ID
+
 #define FRAME_TYPE_MGMT   0
 #define SUBTYPE_PROBE_REQ 4
 
@@ -39,6 +46,12 @@ static_assert(sizeof(BOARD_ID) <= 17, "BOARD_ID must be <= 16 chars "
 #endif
 #ifndef WIFI_RETRY_MS
 #define WIFI_RETRY_MS 5000       // re-issue WiFi.begin() this often while joining
+#endif
+#ifndef REPORT_LIMIT_MS
+#define REPORT_LIMIT_MS 120000   // hard backstop for a report phase that never
+                                 // gets on the air (AP outage) — longer than
+                                 // PH_HOME_MS so a WiFi blip no longer silently
+                                 // throws the whole capture session away
 #endif
 
 // ---------------------------------------------------------------------------
@@ -173,10 +186,12 @@ static uint16_t publish_seen() {
 }
 
 // The MQTT write only reaches the socket; the WiFi TCP TX queue needs a few
-// link-layer turns before ESP.restart wipes RAM. Loop a moment and report what
-// could not be flushed.
+// link-layer turns before ESP.restart wipes RAM. Loop unconditionally for the
+// full 10 turns (a pending_count()>0 guard used to make this loop a no-op as
+// soon as every sighting was QUEUED — the queue state is not the socket
+// state, so the "drain" never actually drained) and report what is left.
 static void drain_and_reboot() {
-  for (int attempt = 0; attempt < 10 && pending_count() > 0; attempt++) {
+  for (int attempt = 0; attempt < 10; attempt++) {
     mqtt.loop();
     delay(200);
   }
@@ -199,10 +214,10 @@ static bool mqtt_connect() {
 #ifdef MQTT_USER
   if (strlen(MQTT_USER) > 0) {
     return mqtt.connect(BOARD_ID, MQTT_USER, MQTT_PASS,
-                        "indoor/online", 1, true, will, true);
+                        ONLINE_TOPIC, 1, true, will, true);
   }
 #endif
-  return mqtt.connect(BOARD_ID, "indoor/online", 1, true, will);
+  return mqtt.connect(BOARD_ID, ONLINE_TOPIC, 1, true, will);
 }
 
 // -----------------------------------------------------------------------------
@@ -275,7 +290,11 @@ void loop() {
       doc["online"] = true;
       char online_msg[96];
       serializeJson(doc, online_msg, sizeof(online_msg));
-      mqtt.publish("indoor/online", online_msg, true);
+      // same QoS (1) and retained flag as the LWT so broker-side ordering
+      // between the two is defined — a stale heartbeat must never arrive
+      // after a death LWT and resurrect the retained "online" flag
+      mqtt.publish(ONLINE_TOPIC, (const uint8_t *)online_msg,
+                   strlen(online_msg), 1, true);
       digitalWrite(LED_BUILTIN, HIGH);
     }
   }
@@ -283,6 +302,16 @@ void loop() {
   publish_seen();                 // drains this boot's captures via MQTT
 
   if (millis() >= phase_until) {
-    drain_and_reboot();
+    // An AP outage must not silently discard the session: keep associating
+    // and publishing until the queue empties — reboot right then to shorten
+    // the online window — or until the REPORT_LIMIT_MS backstop runs out.
+    if (pending_count() == 0) {
+      drain_and_reboot();
+    } else if (millis() >= phase_until + (REPORT_LIMIT_MS - PH_HOME_MS)) {
+      Serial.printf("report phase maxed out after %lu ms — rebooting with "
+                    "%u sightings unflushed\n",
+                    (unsigned long)REPORT_LIMIT_MS, pending_count());
+      drain_and_reboot();
+    }
   }
 }

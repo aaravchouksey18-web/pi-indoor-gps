@@ -12,15 +12,20 @@ Hardening in this version:
   * payloads validated (messages.parse_sighting) — garbage can't be counted;
   * boards with fewer than --min-per-board samples are dropped (with a loud
     warning) instead of polluting the median with a single glitch sample;
-  * spots.json is written atomically (tmp + rename) so a crash can never
-    truncate the map;
+  * spots.json is written atomically (mkstemp + rename) so a crash can never
+    truncate the map, and an exclusive lock keeps two concurrent calibrations
+    from clobbering each other's spots;
+  * a map recorded for a DIFFERENT device (different --target MAC) is refused
+    — mixing radios makes distances meaningless;
   * Ctrl-C aborts cleanly without writing anything.
 """
 import argparse
+import fcntl
 import json
 import os
 import statistics
 import sys
+import tempfile
 import time
 
 import paho.mqtt.client as mqtt
@@ -92,6 +97,10 @@ def main(argv=None):
         ap.error("--seconds must be >= 5 (a shorter window is pure noise)")
     if not (1 <= args.port <= 65535):
         ap.error("--port must be 1..65535")
+    if args.min_samples < 1:
+        ap.error("--min-samples must be >= 1")
+    if args.min_per_board < 1:
+        ap.error("--min-per-board must be >= 1")
 
     target = normalize_mac(args.target)
     if target is None:
@@ -131,7 +140,8 @@ def main(argv=None):
         try:
             mqttc.connect(args.host, args.port, 30)
             break
-        except OSError as e:
+        except (OSError, ValueError) as e:
+            # ValueError covers paho's "Invalid host." for MQTT_HOST=""
             print(f"warning: broker {args.host}:{args.port} unavailable "
                   f"({e}); retrying in 5 s (Ctrl-C to abort)", flush=True)
             time.sleep(5)
@@ -141,10 +151,14 @@ def main(argv=None):
           f"(target {args.target})")
 
     def wait_for_window():
-        end = time.time() + args.seconds
-        while time.time() < end:
+        # monotonic: a wall-clock jump (first NTP sync on a Pi with no RTC)
+        # must neither abort the window early nor make sleep() raise on a
+        # negative duration. max(0.0, ...) covers a clock step between the
+        # loop test and the sleep call itself.
+        end = time.monotonic() + args.seconds
+        while time.monotonic() < end:
             try:
-                time.sleep(min(1.0, end - time.time()))
+                time.sleep(max(0.0, min(1.0, end - time.monotonic())))
             except KeyboardInterrupt:
                 print("\naborted by Ctrl-C — nothing was written", flush=True)
                 mqttc.loop_stop()
@@ -168,7 +182,11 @@ def main(argv=None):
     kept = {b for b in samples if b not in dropped}
     if dropped and kept:
         print(f"warning: dropping {sorted(dropped)} ({dropped} samples, "
-              f"< {args.min_per_board}): too noisy to trust", flush=True)
+              f"< {args.min_per_board}): too noisy to trust — this spot will "
+              "cover fewer boards than you measured, so under full-coverage "
+              "matching it can only compete with equally narrow spots; "
+              "re-measure with every fleet board listening if you can",
+              flush=True)
     if not kept:
         print(f"aborted: every board has fewer than {args.min_per_board} "
               "samples; collect longer", flush=True)
@@ -180,20 +198,81 @@ def main(argv=None):
         print("aborted: no usable samples", flush=True)
         return 1
 
-    spots = load_existing_spots()
-    spots[args.spot] = dict(vec, _meta={"samples": args.seconds,
-                                        "device": args.target,
-                                        "count": total,
-                                        "per_board": per_board})
-    doc = {"spots": spots}
-    tmp = SPOTS_PATH + ".tmp"
-    with open(tmp, "w") as f:                 # atomic: never truncate the map
-        json.dump(doc, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, SPOTS_PATH)
-    print(f"saved {args.spot} -> {SPOTS_PATH}")
-    return 0
+    # Serialize concurrent calibrations: two processes reading the same map
+    # and both writing a fixed ".tmp" path used to lose one whole spot
+    # (FileNotFoundError mid-replace, or silent last-writer-wins when both
+    # finish). An exclusive advisory lock on a sidecar file is held across
+    # the whole read-modify-write, so a co-run aborts fast instead of
+    # clobbering the map.
+    lock_fd = open(SPOTS_PATH + ".lock", "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(f"error: another calibrate.py is writing {SPOTS_PATH}; retry "
+              "when it finishes (this run wrote nothing)", flush=True)
+        return 1
+
+    try:
+        spots = load_existing_spots()
+        # A map recorded for a DIFFERENT device gives confident nonsense: two
+        # radios (different TX power / antenna) have no meaningful distance
+        # between their fingerprints. Refuse to extend such a map silently.
+        foreign = sorted({
+            fp["_meta"]["device"]
+            for fp in spots.values()
+            if isinstance(fp, dict)
+            and isinstance(fp.get("_meta"), dict)
+            and fp["_meta"].get("device")
+            and fp["_meta"]["device"] != args.target
+        })
+        if foreign:
+            print(f"error: spots.json was recorded for device(s) "
+                  f"{', '.join(foreign)} but --target is {args.target}; "
+                  "mixing devices produces meaningless distances — re-record "
+                  "this spot with the same device or start a fresh map",
+                  flush=True)
+            return 1
+
+        # A spot narrower than an existing one can never win a match under
+        # exact-set-equality matching — say so BEFORE saving, not as a
+        # surprise only visible in the collector's refusal log.
+        for name, fp in spots.items():
+            fset = {b for b in fp if b != "_meta"} if isinstance(fp, dict) else set()
+            if fset and len(fset) > len(vec):
+                print(f"warning: this spot covers {len(vec)} board(s) but "
+                      f"existing \"{name}\" covers {len(fset)} — the "
+                      "collector refuses a live vector narrower than the "
+                      "map's widest spot, so this spot can never win until "
+                      "every fleet board is heard", flush=True)
+                break
+
+        # metadata must describe the vector actually saved: count/per_board
+        # over the KEPT boards only, never the dropped ones
+        kept_count = sum(len(samples[b]) for b in kept)
+        kept_per_board = {b: per_board[b] for b in sorted(kept)}
+        spots[args.spot] = dict(vec, _meta={"samples": args.seconds,
+                                            "device": args.target,
+                                            "count": kept_count,
+                                            "per_board": kept_per_board})
+        doc = {"spots": spots}
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(SPOTS_PATH) or ".",
+                                   prefix=".spots-", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:      # atomic: never truncate the map
+            json.dump(doc, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SPOTS_PATH)
+        # fsync the DIRECTORY too, so the rename survives a power cut on the
+        # Pi's SD card (page-cache-only metadata can vanish on such devices)
+        dir_fd = os.open(os.path.dirname(SPOTS_PATH) or ".", os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        print(f"saved {args.spot} -> {SPOTS_PATH}")
+        return 0
+    finally:
+        lock_fd.close()
 
 
 if __name__ == "__main__":

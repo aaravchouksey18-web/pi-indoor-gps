@@ -14,6 +14,15 @@ import re
 # firmware publishes lowercase "aa:bb:cc:dd:ee:ff" MACs (see publish_seen)
 _MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 
+# Sane ceiling for one sighting payload. The firmware's worst case is ~121
+# bytes; anything bigger than 512 B is either not a sighting or is hostile.
+# Checking before json.loads also caps the two expensive failure modes there:
+# a deeply nested payload can hit Python's recursion limit (RecursionError,
+# a RuntimeError that the old except clause did NOT catch — uncaught, paho
+# re-raises it from the on_message callback and kills the collector) and a
+# huge payload can exhaust memory mid-parse.
+MAX_SIGHTING_BYTES = 512
+
 
 def normalize_mac(raw):
     """Lowercase + validate a MAC address; None if it can't be one."""
@@ -37,9 +46,19 @@ def parse_sighting(payload_bytes):
     Anything else is dropped silently — a collector must never die (or
     publish a bogus estimate) because one node sent garbage.
     """
+    if not isinstance(payload_bytes, (bytes, bytearray)):
+        return None
+    if len(payload_bytes) > MAX_SIGHTING_BYTES:
+        return None
     try:
         p = json.loads(payload_bytes.decode())
-    except (ValueError, UnicodeDecodeError, AttributeError):
+    except (ValueError, UnicodeDecodeError, AttributeError,
+            RecursionError, MemoryError):
+        # RecursionError (deeply nested arrays/objects) is a RuntimeError,
+        # not a ValueError: paho re-raises callback exceptions, so without
+        # this an unauthenticated LAN host could kill the collector with a
+        # 4 KB publish. MemoryError is the same class of remote-DoS: it must
+        # not escape into the MQTT thread.
         return None
     if not isinstance(p, dict):
         return None

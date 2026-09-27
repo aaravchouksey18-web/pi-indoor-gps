@@ -22,7 +22,8 @@ Hardening in this version:
     misconfiguration guard, NOT an auth boundary (any LAN host can author
     sightings on an open broker; secure the broker if that matters);
   * estimates only publish when the matcher is unambiguous (full fingerprint
-    coverage + distance ceiling + margin), and carry a units tag so "distance"
+    coverage + distance ceiling + margin + a live vector at least as wide as
+    the map's widest spot), and carry a units tag so "distance"
     can't be mistaken for metres (it is the Euclidean RSSI distance in dB,
     not a signal level).
 """
@@ -58,7 +59,7 @@ class State:
         return self.boards is None or board in self.boards
 
     def prune(self):
-        now = time.time()
+        now = time.monotonic()
         for board in list(self.nodes):
             for mac in list(self.nodes[board]):
                 if now - self.nodes[board][mac]["ts"] > WINDOW_S:
@@ -68,7 +69,7 @@ class State:
 
     def live_vector(self, mac):
         """{board: rssi} for one target across currently-fresh nodes."""
-        now = time.time()
+        now = time.monotonic()
         vec = {}
         for board, devs in self.nodes.items():
             if mac in devs and now - devs[mac]["ts"] <= WINDOW_S:
@@ -96,7 +97,7 @@ def make_client(state, min_boards=1):
         if not state.allowed(s["board"]):
             return
         state.nodes.setdefault(s["board"], {})[s["mac"]] = {"rssi": s["rssi"],
-                                                            "ts": time.time()}
+                                                            "ts": time.monotonic()}
         state.prune()
         if state.target and s["mac"] == state.target:
             vec = state.live_vector(s["mac"])
@@ -112,6 +113,9 @@ def make_client(state, min_boards=1):
                     "coverage": ("live board set matches no spot (a node "
                                  "the map expects is silent, or an "
                                  "unexpected node is live)"),
+                    "partial_fleet": ("live board set is narrower than the "
+                                      "map's widest spot (fleet nodes are "
+                                      "silent — re-check the sniffer fleet)"),
                     "distance": "closest spot beyond the distance ceiling",
                     "ambiguous": "two spots too close to call (margin)",
                     "no_live": "empty live vector",
@@ -188,7 +192,9 @@ def main(argv=None):
         try:
             mqttc.connect(args.host, args.port, 30)
             break
-        except OSError as e:
+        except (OSError, ValueError) as e:
+            # ValueError covers paho's "Invalid host." (e.g. MQTT_HOST=""),
+            # which is NOT an OSError and used to crash with a raw traceback
             print(f"warning: broker {args.host}:{args.port} unavailable "
                   f"({e}); retrying in 5 s (Ctrl-C to abort)", flush=True)
             time.sleep(5)

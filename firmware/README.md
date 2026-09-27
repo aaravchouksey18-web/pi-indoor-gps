@@ -5,10 +5,10 @@
 
 ## Topics
 
-| topic            | direction | payload (example)                                  |
-|------------------|-----------|----------------------------------------------------|
-| `indoor/sighting`| node → hub| `{"board":"a","mac":"aa:bb:..","ssid":"..","rssi":-58,"rssi_n":12}` |
-| `indoor/online`  | node → hub| `{"board":"a","online":true}` (retained; LWT false) |
+| topic                    | direction | payload (example)                                  |
+|--------------------------|-----------|----------------------------------------------------|
+| `indoor/sighting`        | node → hub| `{"board":"a","mac":"aa:bb:..","ssid":"..","rssi":-58,"rssi_n":12}` |
+| `indoor/online/<board>`  | node → hub| `{"board":"a","online":true}` (retained; LWT false) |
 
 `rssi` is the **strongest** probe RSSI a device produced during the node's
 15 s sniff session (rxctl byte 0). `rssi_n` counts the probes behind it.
@@ -43,11 +43,16 @@ Please don't "upgrade" ArduinoJson to v7 in a local edit — v7 dropped
   more.
 - Sightings are queued to the MQTT socket and flushed over a second or two;
   the report phase now re-issues `WiFi.begin()` every 5 s while joining (a
-  stalled association no longer silently eats the session) and drains the TCP
-  queue before the restart that ends every cycle, reporting any sightings
-  that couldn't leave.
-- `indoor/online` is retained with a **LWT** `online:false` — the hub can
-  detect a dead node.
+  stalled association no longer silently eats the session) and keeps trying up
+  to a 120 s backstop before giving up, then drains the TCP queue
+  (unconditionally, for the full drain window) before the restart that ends
+  every cycle, reporting any sightings that couldn't leave.
+- The heartbeat and the LWT both live on a **per-node** topic
+  `indoor/online/<board>` (retained; LWT `online:false` publishes here too),
+  at the same QoS 1 — sharing one flat `indoor/online` across the fleet would
+  let the last publisher hide every other node, and a dead node's retained LWT
+  would overwrite a live node's retained heartbeat. Subscribe to
+  `indoor/online/+` on the hub to see the whole fleet.
 
 ## Note
 
